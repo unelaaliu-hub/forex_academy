@@ -4,7 +4,5 @@ requests
 numpy
 pandas
 yfinance
-websockets<10.3
+websockets
 certifi
-python-deriv-api
-python-dotenv

@@ -1,21 +1,36 @@
 """
-Synthetic Indices Engine — Deriv official python-deriv-api
-Lazy-import deriv_api so gunicorn startup isn't blocked.
+Synthetic Indices Engine — Deriv WebSocket API (raw websockets)
+Multi-endpoint fallback + authorized session.
 """
 import json
 import time
 import math
+import ssl
 import asyncio
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
 
-# NOTE: deriv_api is imported lazily inside the fetch function to avoid
-# blocking gunicorn startup on Render's free tier.
-DerivAPI = None
+try:
+    import certifi
+except ImportError:
+    certifi = None
 
-# App ID 1089 is Deriv's demo app id (works for public data)
-APP_ID = 1089
+try:
+    import websockets
+except ImportError:
+    websockets = None
+
+DERIV_API_TOKEN = "pat_ee21491213e73e23f6eef2425d58a74f1b3ec9efe932357a8b9d7dac3129308f"
+
+APP_ID = 1
+
+DERIV_ENDPOINTS = [
+    f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
+    f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}",
+    f"wss://green.derivws.com/websockets/v3?app_id={APP_ID}",
+    f"wss://blue.derivws.com/websockets/v3?app_id={APP_ID}",
+]
 
 SYNTHETIC_SYMBOLS = {
     "R_10":     {"name": "Volatility 10",  "kind": "reversion"},
@@ -65,83 +80,148 @@ def _safe_float(v, default=0.0):
         return default
 
 
-async def _fetch_candles_async(symbol, timeframe, count=500):
-    """Fetch candles via the official python-deriv-api library."""
-    # Lazy import — keeps gunicorn startup fast
+def _build_ssl_context():
     try:
-        from deriv_api import DerivAPI as _DerivAPI
-    except ImportError:
-        return None, "python-deriv-api not installed"
-    DerivAPI = _DerivAPI
+        if certifi is not None:
+            return ssl.create_default_context(cafile=certifi.where())
+        return ssl.create_default_context()
+    except Exception:
+        return None
+
+
+async def _do_exchange(ws, req):
+    """Send auth + candles request, parse response."""
+    if DERIV_API_TOKEN and DERIV_API_TOKEN.startswith("pat_"):
+        await ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
+        try:
+            auth_raw = await asyncio.wait_for(ws.recv(), timeout=10)
+            auth_msg = json.loads(auth_raw)
+            if isinstance(auth_msg, dict) and "error" in auth_msg:
+                err = auth_msg["error"]
+                m = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                print(f"[synthetic] Auth warning: {m}")
+        except Exception:
+            pass
+
+    await ws.send(json.dumps(req))
+
+    for _ in range(15):
+        raw = await asyncio.wait_for(ws.recv(), timeout=10)
+        if not raw:
+            continue
+        msg = json.loads(raw)
+
+        if isinstance(msg, dict) and "authorize" in msg:
+            continue
+
+        if "error" in msg:
+            err = msg["error"]
+            m = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            return None, None, f"Deriv error: {m}"
+
+        if "candles" in msg:
+            candles = msg["candles"]
+            if not candles or len(candles) < 50:
+                return None, None, "Not enough candles"
+
+            rows = []
+            for c in candles:
+                try:
+                    rows.append({
+                        "time": pd.to_datetime(int(c["epoch"]), unit="s", utc=True),
+                        "open": _safe_float(c["open"]),
+                        "high": _safe_float(c["high"]),
+                        "low": _safe_float(c["low"]),
+                        "close": _safe_float(c["close"]),
+                    })
+                except Exception:
+                    continue
+
+            if len(rows) < 50:
+                return None, None, "Parsed rows insufficient"
+
+            df = pd.DataFrame(rows).set_index("time").sort_index()
+            df = df[~df.index.duplicated(keep="last")].dropna()
+            return df, "DERIV", None
+
+    return None, None, "No candle response"
+
+
+async def _try_endpoint(url, req, ssl_context):
+    base_kwargs = {
+        "open_timeout": 10,
+        "close_timeout": 5,
+        "ping_interval": None,
+    }
+    if ssl_context is not None:
+        base_kwargs["ssl"] = ssl_context
+
+    # Attempt 1 — modern kwargs
+    try:
+        extended = dict(base_kwargs)
+        extended["origin"] = "https://app.deriv.com"
+        extended["user_agent_header"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        async with websockets.connect(url, **extended) as ws:
+            return await _do_exchange(ws, req)
+    except TypeError:
+        pass
+    except Exception as e:
+        err_str = f"{type(e).__name__}: {str(e)[:120]}"
+        if "unexpected keyword" not in err_str:
+            return None, None, err_str
+
+    # Attempt 2 — minimal kwargs
+    try:
+        async with websockets.connect(url, **base_kwargs) as ws:
+            return await _do_exchange(ws, req)
+    except TypeError:
+        try:
+            async with websockets.connect(url) as ws:
+                return await _do_exchange(ws, req)
+        except Exception as e:
+            return None, None, f"{type(e).__name__}: {str(e)[:120]}"
+    except Exception as e:
+        return None, None, f"{type(e).__name__}: {str(e)[:120]}"
+
+
+async def _fetch_candles_async(symbol, timeframe, count=500):
+    if websockets is None:
+        return None, "websockets library not installed"
 
     if symbol not in SYNTHETIC_SYMBOLS:
         return None, f"Unknown symbol {symbol}"
 
     gran = TF_GRANULARITY.get(timeframe, 300)
+    req = {
+        "ticks_history": symbol,
+        "adjust_start_time": 1,
+        "count": count,
+        "end": "latest",
+        "start": 1,
+        "style": "candles",
+        "granularity": gran,
+        "subscribe": 0,
+    }
 
-    api = None
-    try:
-        api = DerivAPI(app_id=APP_ID)
-        response = await api.ticks_history({
-            "ticks_history": symbol,
-            "adjust_start_time": 1,
-            "count": count,
-            "end": "latest",
-            "start": 1,
-            "style": "candles",
-            "granularity": gran,
-        })
+    ssl_context = _build_ssl_context()
+    errors = []
 
-        if response is None:
-            return None, "Empty response from Deriv"
+    for url in DERIV_ENDPOINTS:
+        df, src, err = await _try_endpoint(url, req, ssl_context)
+        if df is not None:
+            endpoint_short = url.split("//")[1].split("/")[0]
+            return df, f"DERIV ({endpoint_short})"
+        errors.append(f"{url.split('//')[1].split('/')[0]}: {err}")
 
-        if isinstance(response, dict) and "error" in response:
-            err = response["error"]
-            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-            return None, f"Deriv error: {msg}"
-
-        candles = response.get("candles") if isinstance(response, dict) else None
-        if not candles or len(candles) < 50:
-            return None, "Not enough candles"
-
-        rows = []
-        for c in candles:
-            try:
-                rows.append({
-                    "time": pd.to_datetime(int(c["epoch"]), unit="s", utc=True),
-                    "open": _safe_float(c["open"]),
-                    "high": _safe_float(c["high"]),
-                    "low": _safe_float(c["low"]),
-                    "close": _safe_float(c["close"]),
-                })
-            except Exception:
-                continue
-
-        if len(rows) < 50:
-            return None, "Parsed rows insufficient"
-
-        df = pd.DataFrame(rows).set_index("time").sort_index()
-        df = df[~df.index.duplicated(keep="last")].dropna()
-        return df, "DERIV"
-
-    except Exception as e:
-        return None, f"API error: {type(e).__name__}: {str(e)[:200]}"
-    finally:
-        if api is not None:
-            try:
-                await api.clear()
-            except Exception:
-                pass
+    return None, " | ".join(errors)
 
 
 def fetch_candles(symbol, timeframe, count=500):
-    """Synchronous wrapper for Flask."""
     key = f"{symbol}_{timeframe}_{count}"
     cached = _cache_get(key)
     if cached is not None:
         return cached, "CACHE"
 
-    loop = None
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -149,11 +229,10 @@ def fetch_candles(symbol, timeframe, count=500):
     except Exception as e:
         return None, f"Loop error: {str(e)[:150]}"
     finally:
-        if loop is not None:
-            try:
-                loop.close()
-            except Exception:
-                pass
+        try:
+            loop.close()
+        except Exception:
+            pass
 
     if df is not None:
         _cache_set(key, df)
