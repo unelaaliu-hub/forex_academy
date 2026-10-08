@@ -1,12 +1,11 @@
 """
-Synthetic Indices Engine — Deriv WebSocket API (raw websockets)
-Multi-endpoint fallback + authorized session.
+Synthetic Indices Engine — Deriv WebSocket API (websocket-client, sync)
+Python 3.14 safe — no asyncio.Lock usage.
 """
 import json
 import time
 import math
 import ssl
-import asyncio
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
@@ -17,9 +16,9 @@ except ImportError:
     certifi = None
 
 try:
-    import websockets
+    import websocket  # websocket-client
 except ImportError:
-    websockets = None
+    websocket = None
 
 DERIV_API_TOKEN = "pat_ee21491213e73e23f6eef2425d58a74f1b3ec9efe932357a8b9d7dac3129308f"
 
@@ -89,107 +88,105 @@ def _build_ssl_context():
         return None
 
 
-async def _do_exchange(ws, req):
-    """Send auth + candles request, parse response."""
-    if DERIV_API_TOKEN and DERIV_API_TOKEN.startswith("pat_"):
-        await ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
-        try:
-            auth_raw = await asyncio.wait_for(ws.recv(), timeout=10)
-            auth_msg = json.loads(auth_raw)
-            if isinstance(auth_msg, dict) and "error" in auth_msg:
-                err = auth_msg["error"]
-                m = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-                print(f"[synthetic] Auth warning: {m}")
-        except Exception:
-            pass
+def _try_one_endpoint(url, req, ssl_context):
+    """Synchronous connection using websocket-client."""
+    headers = [
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Origin: https://app.deriv.com",
+    ]
 
-    await ws.send(json.dumps(req))
-
-    for _ in range(15):
-        raw = await asyncio.wait_for(ws.recv(), timeout=10)
-        if not raw:
-            continue
-        msg = json.loads(raw)
-
-        if isinstance(msg, dict) and "authorize" in msg:
-            continue
-
-        if "error" in msg:
-            err = msg["error"]
-            m = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-            return None, None, f"Deriv error: {m}"
-
-        if "candles" in msg:
-            candles = msg["candles"]
-            if not candles or len(candles) < 50:
-                return None, None, "Not enough candles"
-
-            rows = []
-            for c in candles:
-                try:
-                    rows.append({
-                        "time": pd.to_datetime(int(c["epoch"]), unit="s", utc=True),
-                        "open": _safe_float(c["open"]),
-                        "high": _safe_float(c["high"]),
-                        "low": _safe_float(c["low"]),
-                        "close": _safe_float(c["close"]),
-                    })
-                except Exception:
-                    continue
-
-            if len(rows) < 50:
-                return None, None, "Parsed rows insufficient"
-
-            df = pd.DataFrame(rows).set_index("time").sort_index()
-            df = df[~df.index.duplicated(keep="last")].dropna()
-            return df, "DERIV", None
-
-    return None, None, "No candle response"
-
-
-async def _try_endpoint(url, req, ssl_context):
-    base_kwargs = {
-        "open_timeout": 10,
-        "close_timeout": 5,
-        "ping_interval": None,
+    kwargs = {
+        "timeout": 15,
+        "header": headers,
+        "suppress_origin": False,
     }
     if ssl_context is not None:
-        base_kwargs["ssl"] = ssl_context
+        kwargs["sslopt"] = {"context": ssl_context}
 
-    # Attempt 1 — modern kwargs
+    ws = None
     try:
-        extended = dict(base_kwargs)
-        extended["origin"] = "https://app.deriv.com"
-        extended["user_agent_header"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        async with websockets.connect(url, **extended) as ws:
-            return await _do_exchange(ws, req)
-    except TypeError:
-        pass
+        ws = websocket.create_connection(url, **kwargs)
+
+        # Step 1 — authorize
+        if DERIV_API_TOKEN and DERIV_API_TOKEN.startswith("pat_"):
+            ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
+            try:
+                ws.settimeout(10)
+                auth_raw = ws.recv()
+                if auth_raw:
+                    auth_msg = json.loads(auth_raw)
+                    if isinstance(auth_msg, dict) and "error" in auth_msg:
+                        err = auth_msg["error"]
+                        m = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                        print(f"[synthetic] Auth warning: {m}")
+            except Exception:
+                pass
+
+        # Step 2 — request candles
+        ws.send(json.dumps(req))
+
+        for _ in range(15):
+            ws.settimeout(10)
+            raw = ws.recv()
+            if not raw:
+                continue
+            msg = json.loads(raw)
+
+            if isinstance(msg, dict) and "authorize" in msg:
+                continue
+
+            if "error" in msg:
+                err = msg["error"]
+                m = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                return None, None, f"Deriv error: {m}"
+
+            if "candles" in msg:
+                candles = msg["candles"]
+                if not candles or len(candles) < 50:
+                    return None, None, "Not enough candles"
+
+                rows = []
+                for c in candles:
+                    try:
+                        rows.append({
+                            "time": pd.to_datetime(int(c["epoch"]), unit="s", utc=True),
+                            "open": _safe_float(c["open"]),
+                            "high": _safe_float(c["high"]),
+                            "low": _safe_float(c["low"]),
+                            "close": _safe_float(c["close"]),
+                        })
+                    except Exception:
+                        continue
+
+                if len(rows) < 50:
+                    return None, None, "Parsed rows insufficient"
+
+                df = pd.DataFrame(rows).set_index("time").sort_index()
+                df = df[~df.index.duplicated(keep="last")].dropna()
+                return df, "DERIV", None
+
+        return None, None, "No candle response"
     except Exception as e:
-        err_str = f"{type(e).__name__}: {str(e)[:120]}"
-        if "unexpected keyword" not in err_str:
-            return None, None, err_str
-
-    # Attempt 2 — minimal kwargs
-    try:
-        async with websockets.connect(url, **base_kwargs) as ws:
-            return await _do_exchange(ws, req)
-    except TypeError:
-        try:
-            async with websockets.connect(url) as ws:
-                return await _do_exchange(ws, req)
-        except Exception as e:
-            return None, None, f"{type(e).__name__}: {str(e)[:120]}"
-    except Exception as e:
-        return None, None, f"{type(e).__name__}: {str(e)[:120]}"
+        return None, None, f"{type(e).__name__}: {str(e)[:150]}"
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
 
 
-async def _fetch_candles_async(symbol, timeframe, count=500):
-    if websockets is None:
-        return None, "websockets library not installed"
+def fetch_candles(symbol, timeframe, count=500):
+    if websocket is None:
+        return None, "websocket-client not installed"
 
     if symbol not in SYNTHETIC_SYMBOLS:
         return None, f"Unknown symbol {symbol}"
+
+    key = f"{symbol}_{timeframe}_{count}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached, "CACHE"
 
     gran = TF_GRANULARITY.get(timeframe, 300)
     req = {
@@ -207,36 +204,14 @@ async def _fetch_candles_async(symbol, timeframe, count=500):
     errors = []
 
     for url in DERIV_ENDPOINTS:
-        df, src, err = await _try_endpoint(url, req, ssl_context)
+        df, src, err = _try_one_endpoint(url, req, ssl_context)
         if df is not None:
             endpoint_short = url.split("//")[1].split("/")[0]
+            _cache_set(key, df)
             return df, f"DERIV ({endpoint_short})"
         errors.append(f"{url.split('//')[1].split('/')[0]}: {err}")
 
     return None, " | ".join(errors)
-
-
-def fetch_candles(symbol, timeframe, count=500):
-    key = f"{symbol}_{timeframe}_{count}"
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached, "CACHE"
-
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        df, src = loop.run_until_complete(_fetch_candles_async(symbol, timeframe, count))
-    except Exception as e:
-        return None, f"Loop error: {str(e)[:150]}"
-    finally:
-        try:
-            loop.close()
-        except Exception:
-            pass
-
-    if df is not None:
-        _cache_set(key, df)
-    return df, src
 
 
 def compute_indicators(df, bb_period=20, bb_std=2.0, rsi_period=14, atr_period=14):

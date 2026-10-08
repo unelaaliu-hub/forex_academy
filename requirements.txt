@@ -4,5 +4,5 @@ requests
 numpy
 pandas
 yfinance
-websockets==10.4
+websockets-client
 certifi
