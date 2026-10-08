@@ -59,9 +59,6 @@
   .strategy-tag { display:inline-block; padding:3px 8px; border-radius:4px; font-size:10px; letter-spacing:1px; background:rgba(0,212,230,0.1); color:var(--cyan); border:1px solid rgba(0,212,230,0.3); margin-bottom:8px; font-family:var(--font-cyber); }
   .kv { display:flex; justify-content:space-between; padding:6px 0; font-size:13px; border-bottom:1px solid rgba(255,255,255,0.04); }
   .kv:last-child { border-bottom:none; }
-  .error-panel { background:rgba(220,38,38,0.08); border:2px solid rgba(220,38,38,0.5); border-radius:12px; padding:20px; text-align:center; }
-  .error-title { font-family:var(--font-cyber); font-size:14px; letter-spacing:2px; color:var(--red); margin-bottom:10px; }
-  .error-body { font-size:12px; color:#c8d0dc; line-height:1.6; word-break:break-word; }
 </style>
 {% endblock %}
 
@@ -143,7 +140,7 @@
 
 {% block scripts %}
 <script>
-const DERIV_APP_ID = "34CcOO91GQuNu9OZ0PdDO";
+const DERIV_APP_ID = "1089";
 const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${DERIV_APP_ID}`;
 
 const TF_GRAN = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400 };
@@ -257,7 +254,6 @@ function computeIndicators(candles) {
   const rsi = new Array(n).fill(null);
   const atr = new Array(n).fill(null);
 
-  // Bollinger
   for (let i = 0; i < n; i++) {
     const m = sma(closes, 20, i);
     if (m !== null) {
@@ -269,7 +265,6 @@ function computeIndicators(candles) {
     }
   }
 
-  // RSI
   const rsiPeriod = 14;
   for (let i = rsiPeriod; i < n; i++) {
     let gainSum = 0, lossSum = 0;
@@ -287,7 +282,6 @@ function computeIndicators(candles) {
     }
   }
 
-  // ATR
   const atrPeriod = 14;
   for (let i = 0; i < n; i++) {
     if (i < atrPeriod) continue;
@@ -580,8 +574,7 @@ function fetchFromDeriv() {
   statusEl.textContent = "Connecting to Deriv…";
   if (dot) dot.classList.add('busy');
 
-  const url = WS_URL;
-  const ws = new WebSocket(url);
+  const ws = new WebSocket(WS_URL);
   let settled = false;
 
   const timeout = setTimeout(() => {
@@ -671,7 +664,6 @@ function handleCandles(candles) {
   const last = enriched[enriched.length - 1];
   const meta = SYMBOL_META[SYMBOL];
 
-  // Chart
   const chartCandles = enriched.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }));
   candleSeries.setData(chartCandles);
 
@@ -684,7 +676,6 @@ function handleCandles(candles) {
 
   setTimeout(() => { try { chart.timeScale().fitContent(); } catch(e) {} }, 100);
 
-  // Header
   document.getElementById('symbolTitle').textContent = meta ? meta.name : SYMBOL;
   document.getElementById('priceDisplay').textContent = last.close.toFixed(2);
   document.getElementById('sourceLine').textContent = `📡 Source: DERIV (browser)`;
@@ -694,7 +685,6 @@ function handleCandles(candles) {
   document.getElementById('infoTf').textContent = TIMEFRAME;
   document.getElementById('infoCount').textContent = enriched.length;
 
-  // Strategy
   const kind = meta ? meta.kind : null;
   const setup = runStrategy(enriched, kind);
   currentSetup = setup;
@@ -711,6 +701,9 @@ function renderSetupPanel(setup, df) {
 
   if (!setup) {
     panel.className = 'setup-panel none';
+    panel.style.borderColor = '';
+    panel.style.background = '';
+    dirEl.style.color = '';
     dirEl.textContent = 'NO SETUP';
     rrEl.textContent = '';
     const kind = SYMBOL_META[SYMBOL] ? SYMBOL_META[SYMBOL].kind : 'unknown';
@@ -721,6 +714,10 @@ function renderSetupPanel(setup, df) {
     body.innerHTML = `<div style="font-size:12px; color:var(--muted); line-height:1.5;">${hint}</div>`;
     return;
   }
+
+  panel.style.borderColor = '';
+  panel.style.background = '';
+  dirEl.style.color = '';
 
   const isBuy = setup.direction === 'BUY';
   panel.className = 'setup-panel ' + (isBuy ? 'buy' : 'sell');
@@ -816,7 +813,6 @@ function showError(msg) {
   document.getElementById('refreshStatus').textContent = 'Error — retrying in 30s';
 }
 
-// ---------- BOOT ----------
 window.addEventListener('load', () => {
   setTimeout(() => {
     if (!initChart()) return;
