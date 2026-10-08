@@ -1,0 +1,411 @@
+{% extends "base.html" %}
+{% block title %}Strategy Backtester | Forex Academy{% endblock %}
+
+{% block head %}
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  .bt-header { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:24px; flex-wrap:wrap; gap:16px; }
+  .bt-title { font-family:var(--font-cyber); font-size:26px; letter-spacing:4px; margin:0 0 6px 0; }
+  .bt-sub { font-size:12px; color:var(--muted); letter-spacing:2px; }
+
+  .bt-form { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-bottom:24px; padding:16px 20px; background:#0a0c12; border:1px solid rgba(255,255,255,0.06); border-radius:10px; }
+  .bt-field { display:flex; flex-direction:column; gap:6px; }
+  .bt-field label { font-size:10px; color:var(--muted); letter-spacing:2px; font-family:var(--font-cyber); text-transform:uppercase; }
+  .bt-field select { padding:8px 14px; background:#0a0c12; border:1px solid rgba(255,255,255,0.1); color:#e6ecf5; font-family:var(--font-cyber); font-size:12px; letter-spacing:1px; border-radius:6px; cursor:pointer; min-width:120px; }
+  .bt-field select:focus { outline:none; border-color:var(--cyan); }
+  .bt-run { padding:10px 24px; background:rgba(0,212,230,0.15); border:1px solid var(--cyan); color:var(--cyan); font-family:var(--font-cyber); font-size:12px; letter-spacing:2px; cursor:pointer; border-radius:6px; transition:.2s; }
+  .bt-run:hover { background:rgba(0,212,230,0.25); }
+  .bt-run:disabled { opacity:0.5; cursor:wait; }
+
+  .bt-status { padding:12px 18px; margin-bottom:20px; border-radius:8px; font-size:13px; display:none; }
+  .bt-status.show { display:block; }
+  .bt-status.loading { background:rgba(0,212,230,0.08); border:1px solid rgba(0,212,230,0.3); color:var(--cyan); }
+  .bt-status.error { background:rgba(220,38,38,0.08); border:1px solid rgba(220,38,38,0.3); color:var(--red); }
+
+  .bt-empty { padding:60px 20px; text-align:center; background:#0a0c12; border:1px solid rgba(255,255,255,0.06); border-radius:10px; }
+  .bt-empty-icon { font-size:48px; margin-bottom:12px; opacity:0.3; }
+  .bt-empty-title { font-family:var(--font-cyber); font-size:14px; letter-spacing:3px; color:var(--muted); margin-bottom:8px; }
+  .bt-empty-sub { font-size:13px; color:#6b7280; }
+
+  /* ---- STATS GRID ---- */
+  .bt-stats { display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; margin-bottom:22px; }
+  @media (max-width: 900px) { .bt-stats { grid-template-columns:repeat(2, 1fr); } }
+  .bt-stat { padding:16px 18px; background:#0a0c12; border:1px solid rgba(255,255,255,0.06); border-radius:10px; }
+  .bt-stat-label { font-size:10px; color:var(--muted); letter-spacing:2px; font-family:var(--font-cyber); text-transform:uppercase; margin-bottom:8px; }
+  .bt-stat-val { font-family:var(--font-cyber); font-size:24px; letter-spacing:1px; }
+  .bt-stat-val.green { color:var(--green); }
+  .bt-stat-val.red { color:var(--red); }
+  .bt-stat-val.gold { color:var(--gold); }
+  .bt-stat-val.cyan { color:var(--cyan); }
+  .bt-stat-val.muted { color:var(--muted); }
+  .bt-stat-sub { font-size:11px; color:#6b7280; margin-top:4px; letter-spacing:1px; }
+
+  /* ---- EQUITY CHART ---- */
+  .bt-chart-card { padding:16px; background:#0a0c12; border:1px solid rgba(255,255,255,0.06); border-radius:10px; margin-bottom:22px; }
+  .bt-chart-title { font-family:var(--font-cyber); font-size:11px; letter-spacing:3px; color:var(--cyan); margin-bottom:14px; text-transform:uppercase; }
+  #equityChart { width:100%; height:280px; }
+
+  /* ---- TRADES TABLE ---- */
+  .bt-table-card { padding:16px; background:#0a0c12; border:1px solid rgba(255,255,255,0.06); border-radius:10px; }
+  .bt-table-title { font-family:var(--font-cyber); font-size:11px; letter-spacing:3px; color:var(--cyan); margin-bottom:14px; text-transform:uppercase; }
+  .bt-table-wrap { overflow-x:auto; }
+  .bt-table { width:100%; border-collapse:collapse; font-size:12px; }
+  .bt-table th { text-align:left; padding:10px 8px; font-family:var(--font-cyber); font-size:10px; letter-spacing:1.5px; color:var(--muted); text-transform:uppercase; border-bottom:1px solid rgba(255,255,255,0.08); font-weight:600; }
+  .bt-table td { padding:10px 8px; border-bottom:1px solid rgba(255,255,255,0.03); color:#c8d0dc; font-family:'Courier New', monospace; }
+  .bt-table tr:hover td { background:rgba(255,255,255,0.02); }
+  .bt-table .dir-buy { color:var(--green); font-weight:700; font-family:var(--font-cyber); letter-spacing:1px; }
+  .bt-table .dir-sell { color:var(--red); font-weight:700; font-family:var(--font-cyber); letter-spacing:1px; }
+  .bt-table .outcome-tp1 { color:var(--green); }
+  .bt-table .outcome-tp2 { color:#22c55e; font-weight:700; }
+  .bt-table .outcome-sl { color:var(--red); }
+  .bt-table .pnl-pos { color:var(--green); font-weight:700; }
+  .bt-table .pnl-neg { color:var(--red); font-weight:700; }
+  .bt-table .conf-HIGH { color:var(--green); }
+  .bt-table .conf-MEDIUM { color:var(--gold); }
+  .bt-table .conf-LOW { color:var(--muted); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="bt-header">
+  <div>
+    <div class="bt-sub">STRATEGY BACKTESTER</div>
+    <h1 class="bt-title">REALISTIC REPLAY</h1>
+    <div class="bt-sub" style="margin-top:6px;">Runs the scanner's logic on historical data — no lookahead</div>
+  </div>
+</div>
+
+<div class="bt-form">
+  <div class="bt-field">
+    <label>Symbol</label>
+    <select id="btSymbol">
+      <option value="XAUUSD">XAUUSD</option>
+      <option value="EURUSD">EURUSD</option>
+      <option value="GBPUSD">GBPUSD</option>
+      <option value="USDJPY">USDJPY</option>
+      <option value="AUDUSD">AUDUSD</option>
+      <option value="BTCUSD">BTCUSD</option>
+      <option value="ETHUSD">ETHUSD</option>
+    </select>
+  </div>
+  <div class="bt-field">
+    <label>Timeframe</label>
+    <select id="btTF">
+      <option value="15m">15M</option>
+      <option value="1h" selected>1H</option>
+      <option value="4h">4H</option>
+      <option value="1d">1D</option>
+    </select>
+  </div>
+  <button class="bt-run" id="btRunBtn" onclick="runBacktest()">▶ RUN BACKTEST</button>
+</div>
+
+<div id="btStatus" class="bt-status"></div>
+
+<div id="btEmpty" class="bt-empty">
+  <div class="bt-empty-icon">📊</div>
+  <div class="bt-empty-title">NO RESULTS YET</div>
+  <div class="bt-empty-sub">Pick a symbol and timeframe, then click Run Backtest</div>
+</div>
+
+<div id="btResults" style="display:none;">
+  <div class="bt-stats">
+    <div class="bt-stat">
+      <div class="bt-stat-label">Total Trades</div>
+      <div class="bt-stat-val cyan" id="sTotal">—</div>
+      <div class="bt-stat-sub" id="sTotalSub">—</div>
+    </div>
+    <div class="bt-stat">
+      <div class="bt-stat-label">Win Rate</div>
+      <div class="bt-stat-val" id="sWinRate">—</div>
+      <div class="bt-stat-sub" id="sWinLoss">—</div>
+    </div>
+    <div class="bt-stat">
+      <div class="bt-stat-label">Avg R per Trade</div>
+      <div class="bt-stat-val" id="sAvgR">—</div>
+      <div class="bt-stat-sub" id="sAvgRSub">—</div>
+    </div>
+    <div class="bt-stat">
+      <div class="bt-stat-label">Profit Factor</div>
+      <div class="bt-stat-val" id="sPF">—</div>
+      <div class="bt-stat-sub" id="sPFSub">—</div>
+    </div>
+    <div class="bt-stat">
+      <div class="bt-stat-label">Final Balance</div>
+      <div class="bt-stat-val" id="sFinal">—</div>
+      <div class="bt-stat-sub" id="sStartBal">—</div>
+    </div>
+    <div class="bt-stat">
+      <div class="bt-stat-label">Net P&L</div>
+      <div class="bt-stat-val" id="sNetPnl">—</div>
+      <div class="bt-stat-sub" id="sNetPnlSub">—</div>
+    </div>
+    <div class="bt-stat">
+      <div class="bt-stat-label">Skipped (No Entry)</div>
+      <div class="bt-stat-val muted" id="sSkipEntry">—</div>
+      <div class="bt-stat-sub">setup fired, price never reached</div>
+    </div>
+    <div class="bt-stat">
+      <div class="bt-stat-label">Skipped (Low R:R)</div>
+      <div class="bt-stat-val muted" id="sSkipRR">—</div>
+      <div class="bt-stat-sub">TP closer than 1.5× risk</div>
+    </div>
+  </div>
+
+  <div class="bt-chart-card">
+    <div class="bt-chart-title">📈 Equity Curve</div>
+    <div id="equityChart"></div>
+  </div>
+
+  <div class="bt-table-card">
+    <div class="bt-table-title">📋 Trade Log</div>
+    <div class="bt-table-wrap">
+      <table class="bt-table">
+        <thead>
+          <tr>
+            <th>Entry Time</th>
+            <th>Dir</th>
+            <th>Entry</th>
+            <th>SL</th>
+            <th>TP1</th>
+            <th>TP2</th>
+            <th>Outcome</th>
+            <th>R</th>
+            <th>P&L</th>
+            <th>Balance</th>
+            <th>Bars</th>
+            <th>Conf</th>
+            <th>Zone</th>
+          </tr>
+        </thead>
+        <tbody id="btTradesBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div style="margin-top:20px; font-size:11px; color:#6b7280; line-height:1.6; padding:14px 18px; background:rgba(230,184,0,0.05); border-left:2px solid var(--gold); border-radius:4px;">
+    ⚠️ <b>Backtests are not forecasts.</b> A positive result on past data does not guarantee future performance.
+    This tool exists to reveal whether a strategy has an edge — not to predict the next trade.
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let equityChart = null;
+let equitySeries = null;
+
+function fmtTime(unixSec) {
+  const d = new Date(unixSec * 1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  const h = String(d.getUTCHours()).padStart(2, '0');
+  const min = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${y}-${m}-${day} ${h}:${min}`;
+}
+
+function fmtMoney(v) {
+  if (v === undefined || v === null) return '—';
+  const sign = v < 0 ? '-' : '';
+  return sign + '$' + Math.abs(v).toFixed(2);
+}
+
+function setStatus(type, text) {
+  const el = document.getElementById('btStatus');
+  el.className = 'bt-status show ' + type;
+  el.textContent = text;
+}
+
+function clearStatus() {
+  const el = document.getElementById('btStatus');
+  el.className = 'bt-status';
+  el.textContent = '';
+}
+
+function initEquityChart() {
+  const el = document.getElementById('equityChart');
+  if (!el) return;
+  el.innerHTML = '';
+  equityChart = LightweightCharts.createChart(el, {
+    width: el.clientWidth,
+    height: 280,
+    layout: {
+      background: { color: 'transparent' },
+      textColor: '#8b93a7',
+      fontFamily: "'Trebuchet MS', 'Rajdhani', sans-serif"
+    },
+    grid: {
+      vertLines: { color: 'rgba(255,255,255,0.03)' },
+      horzLines: { color: 'rgba(255,255,255,0.03)' }
+    },
+    rightPriceScale: { borderColor: 'rgba(255,255,255,0.08)' },
+    timeScale: { borderColor: 'rgba(255,255,255,0.08)', timeVisible: true, secondsVisible: false },
+    crosshair: { mode: 0 }
+  });
+  equitySeries = equityChart.addLineSeries({
+    color: '#00d4e6',
+    lineWidth: 2,
+    priceLineVisible: false,
+    lastValueVisible: true,
+  });
+}
+
+function renderEquityCurve(curve) {
+  if (!curve || curve.length === 0) return;
+  // Deduplicate by time (chart requires unique times)
+  const seen = new Set();
+  const data = [];
+  curve.forEach(p => {
+    if (!seen.has(p.time)) {
+      seen.add(p.time);
+      data.push({ time: p.time, value: p.balance });
+    }
+  });
+  data.sort((a, b) => a.time - b.time);
+
+  equitySeries.setData(data);
+  equityChart.timeScale().fitContent();
+}
+
+function renderStats(r) {
+  const total = r.total_trades || 0;
+  const wins = r.wins || 0;
+  const losses = r.losses || 0;
+  const wr = r.win_rate || 0;
+  const avgR = r.avg_r_multiple || 0;
+  const pf = r.profit_factor || 0;
+  const final = r.final_balance || 0;
+  const start = r.starting_balance || 0;
+  const net = r.net_pnl || 0;
+
+  document.getElementById('sTotal').textContent = total;
+  document.getElementById('sTotalSub').textContent = `${r.bars_analyzed || 0} bars analyzed`;
+
+  const wrEl = document.getElementById('sWinRate');
+  wrEl.textContent = wr.toFixed(1) + '%';
+  wrEl.className = 'bt-stat-val ' + (wr >= 50 ? 'green' : wr >= 40 ? 'gold' : 'red');
+  document.getElementById('sWinLoss').textContent = `${wins}W / ${losses}L`;
+
+  const avgREl = document.getElementById('sAvgR');
+  avgREl.textContent = (avgR > 0 ? '+' : '') + avgR.toFixed(2) + 'R';
+  avgREl.className = 'bt-stat-val ' + (avgR > 0.15 ? 'green' : avgR < -0.15 ? 'red' : 'gold');
+  document.getElementById('sAvgRSub').textContent = avgR > 0 ? 'positive edge' : avgR < 0 ? 'negative edge' : 'neutral';
+
+  const pfEl = document.getElementById('sPF');
+  pfEl.textContent = pf >= 999 ? '∞' : pf.toFixed(2);
+  pfEl.className = 'bt-stat-val ' + (pf >= 1.5 ? 'green' : pf >= 1 ? 'gold' : 'red');
+  document.getElementById('sPFSub').textContent = pf >= 1 ? 'profitable ratio' : 'loss > win';
+
+  const fEl = document.getElementById('sFinal');
+  fEl.textContent = fmtMoney(final);
+  fEl.className = 'bt-stat-val ' + (final >= start ? 'green' : 'red');
+  document.getElementById('sStartBal').textContent = 'from ' + fmtMoney(start);
+
+  const nEl = document.getElementById('sNetPnl');
+  nEl.textContent = (net >= 0 ? '+' : '') + fmtMoney(net);
+  nEl.className = 'bt-stat-val ' + (net >= 0 ? 'green' : 'red');
+  const pct = start > 0 ? (net / start * 100) : 0;
+  document.getElementById('sNetPnlSub').textContent = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+
+  document.getElementById('sSkipEntry').textContent = r.skipped_no_entry || 0;
+  document.getElementById('sSkipRR').textContent = r.skipped_low_rr || 0;
+}
+
+function renderTrades(trades) {
+  const tbody = document.getElementById('btTradesBody');
+  tbody.innerHTML = '';
+  if (!trades || trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="13" style="text-align:center; padding:24px; color:#6b7280;">No trades</td></tr>';
+    return;
+  }
+  trades.forEach(t => {
+    const dirClass = t.direction === 'BUY' ? 'dir-buy' : 'dir-sell';
+    const outcomeClass = t.outcome === 'SL' ? 'outcome-sl' : (t.outcome === 'TP2' ? 'outcome-tp2' : 'outcome-tp1');
+    const pnlClass = t.pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+    const confClass = 'conf-' + (t.confidence || 'MEDIUM');
+    const rStr = (t.r_multiple > 0 ? '+' : '') + t.r_multiple.toFixed(2);
+    const pnlStr = (t.pnl >= 0 ? '+' : '') + '$' + Math.abs(t.pnl).toFixed(2);
+
+    tbody.innerHTML += `<tr>
+      <td>${fmtTime(t.entry_time)}</td>
+      <td class="${dirClass}">${t.direction}</td>
+      <td>${t.entry}</td>
+      <td>${t.sl}</td>
+      <td>${t.tp1}</td>
+      <td>${t.tp2}</td>
+      <td class="${outcomeClass}">${t.outcome}</td>
+      <td class="${pnlClass}">${rStr}R</td>
+      <td class="${pnlClass}">${pnlStr}</td>
+      <td>$${t.balance}</td>
+      <td>${t.bars_held}</td>
+      <td class="${confClass}">${t.confidence}</td>
+      <td>${t.zone_type || '—'}</td>
+    </tr>`;
+  });
+}
+
+function runBacktest() {
+  const symbol = document.getElementById('btSymbol').value;
+  const tf = document.getElementById('btTF').value;
+  const btn = document.getElementById('btRunBtn');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ RUNNING...';
+  document.getElementById('btEmpty').style.display = 'none';
+  document.getElementById('btResults').style.display = 'none';
+  setStatus('loading', `Running backtest on ${symbol} ${tf}... this can take 30-60 seconds.`);
+
+  fetch(`/api/backtest?symbol=${symbol}&tf=${tf}`, { cache: 'no-store' })
+    .then(r => r.json())
+    .then(data => {
+      btn.disabled = false;
+      btn.textContent = '▶ RUN BACKTEST';
+
+      if (data.error) {
+        setStatus('error', '❌ ' + data.error);
+        document.getElementById('btEmpty').style.display = 'block';
+        return;
+      }
+
+      if (!data.total_trades || data.total_trades === 0) {
+        clearStatus();
+        document.getElementById('btEmpty').style.display = 'block';
+        document.getElementById('btEmpty').innerHTML =
+          '<div class="bt-empty-icon">🚫</div>' +
+          '<div class="bt-empty-title">NO TRADES TRIGGERED</div>' +
+          '<div class="bt-empty-sub">' +
+          `Skipped ${data.skipped_low_rr || 0} setups for low R:R, ` +
+          `${data.skipped_no_entry || 0} for price never reaching entry.` +
+          '</div>';
+        return;
+      }
+
+      clearStatus();
+      document.getElementById('btResults').style.display = 'block';
+
+      renderStats(data);
+      renderTrades(data.trades || []);
+
+      // Init chart after display:block so it has size
+      setTimeout(() => {
+        if (!equityChart) initEquityChart();
+        renderEquityCurve(data.equity_curve || []);
+      }, 50);
+    })
+    .catch(err => {
+      btn.disabled = false;
+      btn.textContent = '▶ RUN BACKTEST';
+      setStatus('error', '❌ Connection error: ' + err.message);
+      document.getElementById('btEmpty').style.display = 'block';
+    });
+}
+
+window.addEventListener('resize', () => {
+  if (equityChart) {
+    const el = document.getElementById('equityChart');
+    equityChart.applyOptions({ width: el.clientWidth });
+  }
+});
+</script>
+{% endblock %}

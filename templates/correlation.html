@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Correlation Matrix | Forex Academy{% endblock %}
+{% block head %}
+<style>
+  .cm-table { width:100%; border-collapse:collapse; }
+  .cm-table th, .cm-table td { padding:12px; text-align:center; font-family:var(--font-cyber); font-size:12px; border:1px solid rgba(255,255,255,0.06); }
+  .cm-table th { background:rgba(0,212,230,0.06); color:var(--cyan); letter-spacing:1.5px; }
+  .cm-table td { font-weight:600; }
+  .cm-high-pos { background:rgba(34,197,94,0.25); color:#22c55e; }
+  .cm-pos { background:rgba(34,197,94,0.1); color:#86efac; }
+  .cm-neutral { background:rgba(107,114,128,0.15); color:#9ca3af; }
+  .cm-neg { background:rgba(220,38,38,0.1); color:#fca5a5; }
+  .cm-high-neg { background:rgba(220,38,38,0.3); color:#ef4444; }
+</style>
+{% endblock %}
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:20px; flex-wrap:wrap; gap:16px;">
+  <div>
+    <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:4px;">CORRELATION MATRIX</div>
+    <h1 style="font-family:var(--font-cyber); font-size:28px; letter-spacing:4px; margin:0;">CROSS-MARKET FLOW</h1>
+  </div>
+  <div>
+    <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:6px;">TIMEFRAME</div>
+    <div style="display:flex; gap:6px;">
+      {% for tf in ['15m','1h','4h','1d'] %}
+      <a href="?tf={{ tf }}" style="padding:8px 14px; background:#0a0c12; border:1px solid {% if current_tf==tf %}var(--cyan){% else %}rgba(255,255,255,0.08){% endif %}; color:{% if current_tf==tf %}var(--cyan){% else %}var(--muted){% endif %}; font-family:var(--font-cyber); font-size:11px; letter-spacing:2px; border-radius:6px; text-decoration:none;">{{ tf | upper }}</a>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+<div class="glass" style="padding:14px 18px; margin-bottom:20px; font-size:13px; color:#c8d0dc;">
+  💡 <b>How to use:</b> If two pairs are highly correlated (>+0.7), taking both in the same direction doubles your risk. If negatively correlated (<-0.7), they move opposite — take opposite directions or hedge.
+</div>
+{% if data.error %}
+<div class="glass" style="padding:30px; color:var(--red); text-align:center;">{{ data.error }}</div>
+{% else %}
+<div class="glass" style="padding:20px; overflow-x:auto;">
+  <table class="cm-table">
+    <thead>
+      <tr>
+        <th></th>
+        {% for s in data.symbols %}<th>{{ s }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for i in range(data.symbols|length) %}
+      <tr>
+        <th>{{ data.symbols[i] }}</th>
+        {% for j in range(data.symbols|length) %}
+          {% set v = data.matrix[i][j] %}
+          {% if i == j %}
+            <td style="background:rgba(0,212,230,0.15); color:var(--cyan);">1.00</td>
+          {% elif v >= 0.7 %}
+            <td class="cm-high-pos">{{ "%.2f"|format(v) }}</td>
+          {% elif v >= 0.3 %}
+            <td class="cm-pos">{{ "%.2f"|format(v) }}</td>
+          {% elif v > -0.3 %}
+            <td class="cm-neutral">{{ "%.2f"|format(v) }}</td>
+          {% elif v > -0.7 %}
+            <td class="cm-neg">{{ "%.2f"|format(v) }}</td>
+          {% else %}
+            <td class="cm-high-neg">{{ "%.2f"|format(v) }}</td>
+          {% endif %}
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<div class="glass" style="padding:20px; margin-top:16px;">
+  <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin-top:0;">LEGEND</h3>
+  <div style="display:flex; gap:20px; flex-wrap:wrap; font-size:13px;">
+    <div><span style="display:inline-block; width:16px; height:16px; background:rgba(34,197,94,0.25); vertical-align:middle; border-radius:3px;"></span> +0.7 to +1.0 (very correlated)</div>
+    <div><span style="display:inline-block; width:16px; height:16px; background:rgba(34,197,94,0.1); vertical-align:middle; border-radius:3px;"></span> +0.3 to +0.7 (correlated)</div>
+    <div><span style="display:inline-block; width:16px; height:16px; background:rgba(107,114,128,0.15); vertical-align:middle; border-radius:3px;"></span> -0.3 to +0.3 (neutral)</div>
+    <div><span style="display:inline-block; width:16px; height:16px; background:rgba(220,38,38,0.1); vertical-align:middle; border-radius:3px;"></span> -0.7 to -0.3 (inverse)</div>
+    <div><span style="display:inline-block; width:16px; height:16px; background:rgba(220,38,38,0.3); vertical-align:middle; border-radius:3px;"></span> -1.0 to -0.7 (very inverse)</div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

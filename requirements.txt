@@ -1,0 +1,10 @@
+Flask
+gunicorn
+requests
+numpy
+pandas
+yfinance
+websockets
+certifi
+websocket-client
+python-dotenv

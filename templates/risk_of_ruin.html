@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Risk of Ruin Calculator | Forex Academy{% endblock %}
+{% block head %}
+<style>
+  .rr-form-group { margin-bottom:16px; }
+  .rr-form-group label { display:block; font-size:11px; color:var(--muted); letter-spacing:2px; margin-bottom:6px; text-transform:uppercase; }
+  .rr-form-group input { width:100%; padding:12px 14px; background:#0a0c12; border:1px solid rgba(255,255,255,0.08); border-radius:6px; color:#e6ecf5; font-family:var(--font-body); font-size:16px; outline:none; }
+  .rr-form-group input:focus { border-color:var(--cyan); }
+  .rr-result { padding:24px; background:linear-gradient(135deg, rgba(0,212,230,0.08), rgba(122,78,224,0.05)); border:1px solid var(--cyan); border-radius:12px; margin-top:20px; }
+  .rr-big { font-family:var(--font-cyber); font-size:48px; text-align:center; margin:12px 0; }
+  .rr-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06); }
+  .rr-row:last-child { border-bottom:none; }
+  .rr-label { color:var(--muted); }
+  .rr-val { color:#e6ecf5; font-weight:600; font-family:var(--font-cyber); }
+</style>
+{% endblock %}
+{% block content %}
+<div style="margin-bottom:20px;">
+  <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:4px;">RISK MANAGEMENT</div>
+  <h1 style="font-family:var(--font-cyber); font-size:28px; letter-spacing:4px; margin:0;">RISK OF RUIN CALCULATOR</h1>
+</div>
+<div class="glass" style="padding:14px 18px; margin-bottom:20px; font-size:13px; color:#c8d0dc;">
+  💡 Shows the probability of losing 50% of your account, based on your actual win rate, R:R, and position size. Most traders are shocked by these numbers.
+</div>
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:22px;" id="rrLayout">
+  <div class="glass" style="padding:24px;">
+    <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin-top:0;">YOUR PARAMETERS</h3>
+    <div class="rr-form-group"><label>Starting Account ($)</label><input type="number" id="rrBalance" value="1000" oninput="calc()"></div>
+    <div class="rr-form-group"><label>Win Rate (%)</label><input type="number" id="rrWin" value="40" step="1" oninput="calc()"></div>
+    <div class="rr-form-group"><label>Average R:R (e.g. 2 = 1:2)</label><input type="number" id="rrRR" value="2" step="0.1" oninput="calc()"></div>
+    <div class="rr-form-group"><label>Risk per Trade (%)</label><input type="number" id="rrRisk" value="1" step="0.1" oninput="calc()"></div>
+    <div class="rr-form-group"><label>Number of Trades</label><input type="number" id="rrTrades" value="100" oninput="calc()"></div>
+  </div>
+  <div>
+    <div class="rr-result">
+      <div style="font-size:12px; color:var(--muted); letter-spacing:2px; text-align:center;">PROBABILITY OF LOSING 50%</div>
+      <div class="rr-big" id="rrRuinPct">—</div>
+      <div style="font-size:12px; color:var(--muted); letter-spacing:2px; text-align:center; margin-top:4px;" id="rrVerdict">—</div>
+    </div>
+    <div class="glass" style="padding:20px; margin-top:16px;">
+      <h3 style="font-family:var(--font-cyber); font-size:12px; letter-spacing:2px; color:var(--cyan); margin-top:0;">EXPECTED OUTCOMES</h3>
+      <div class="rr-row"><span class="rr-label">Expected Return</span><span class="rr-val" id="rrExpReturn">—</span></div>
+      <div class="rr-row"><span class="rr-label">Worst 5% case</span><span class="rr-val" id="rrWorst">—</span></div>
+      <div class="rr-row"><span class="rr-label">Median outcome</span><span class="rr-val" id="rrMedian">—</span></div>
+      <div class="rr-row"><span class="rr-label">Best 5% case</span><span class="rr-val" id="rrBest">—</span></div>
+      <div class="rr-row"><span class="rr-label">Max drawdown (median)</span><span class="rr-val" id="rrDD">—</span></div>
+    </div>
+  </div>
+</div>
+<style>@media (max-width: 900px) { #rrLayout { grid-template-columns: 1fr !important; } }</style>
+{% endblock %}
+{% block scripts %}
+<script>
+function calc() {
+  const balance = parseFloat(document.getElementById('rrBalance').value) || 1000;
+  const winPct = parseFloat(document.getElementById('rrWin').value) || 40;
+  const rr = parseFloat(document.getElementById('rrRR').value) || 2;
+  const riskPct = parseFloat(document.getElementById('rrRisk').value) || 1;
+  const trades = parseInt(document.getElementById('rrTrades').value) || 100;
+
+  const p = winPct / 100;
+  const q = 1 - p;
+  const riskFrac = riskPct / 100;
+
+  // Expected value per trade (in R)
+  const ev = p * rr - q;
+
+  // Monte Carlo — 2000 simulations
+  const SIM = 2000;
+  let ruins = 0;
+  let finals = [];
+  let maxDDs = [];
+
+  for (let s = 0; s < SIM; s++) {
+    let bal = balance;
+    let peak = balance;
+    let maxDD = 0;
+    let ruined = false;
+    for (let i = 0; i < trades; i++) {
+      if (Math.random() < p) {
+        bal += bal * riskFrac * rr;
+      } else {
+        bal -= bal * riskFrac;
+      }
+      if (bal > peak) peak = bal;
+      const dd = (peak - bal) / peak;
+      if (dd > maxDD) maxDD = dd;
+      if (bal <= balance * 0.5) { ruined = true; break; }
+    }
+    if (ruined) ruins++;
+    finals.push(bal);
+    maxDDs.push(maxDD);
+  }
+
+  finals.sort((a,b) => a-b);
+  maxDDs.sort((a,b) => a-b);
+
+  const ruinPct = (ruins / SIM * 100).toFixed(1);
+  const expReturn = ((balance * Math.pow(1 + ev * riskFrac, trades) / balance - 1) * 100).toFixed(1);
+  const worst5 = finals[Math.floor(SIM * 0.05)];
+  const median = finals[Math.floor(SIM * 0.5)];
+  const best5 = finals[Math.floor(SIM * 0.95)];
+  const medDD = (maxDDs[Math.floor(SIM * 0.5)] * 100).toFixed(1);
+
+  document.getElementById('rrRuinPct').textContent = ruinPct + '%';
+  document.getElementById('rrRuinPct').style.color = ruinPct > 20 ? 'var(--red)' : ruinPct > 5 ? 'var(--gold)' : 'var(--green)';
+
+  let verdict = '';
+  if (ruinPct > 30) verdict = '🔴 DANGER — reduce risk per trade';
+  else if (ruinPct > 10) verdict = '🟡 CAUTION — consider 0.5% risk';
+  else if (ruinPct > 2) verdict = '🟢 ACCEPTABLE — discipline pays off';
+  else verdict = '✅ EXCELLENT — mathematically sound';
+  document.getElementById('rrVerdict').textContent = verdict;
+
+  document.getElementById('rrExpReturn').textContent = (expReturn > 0 ? '+' : '') + expReturn + '%';
+  document.getElementById('rrExpReturn').style.color = expReturn > 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('rrWorst').textContent = '$' + worst5.toFixed(0);
+  document.getElementById('rrWorst').style.color = 'var(--red)';
+  document.getElementById('rrMedian').textContent = '$' + median.toFixed(0);
+  document.getElementById('rrMedian').style.color = 'var(--gold)';
+  document.getElementById('rrBest').textContent = '$' + best5.toFixed(0);
+  document.getElementById('rrBest').style.color = 'var(--green)';
+  document.getElementById('rrDD').textContent = medDD + '%';
+}
+
+calc();
+</script>
+{% endblock %}

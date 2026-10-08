@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Forex Academy — Learn Trading From Scratch{% endblock %}
+
+{% block content %}
+<div style="text-align:center; padding:40px 0 60px;">
+  <h1 style="font-family:var(--font-cyber); font-size:56px; letter-spacing:8px; margin:0; text-shadow:0 0 40px rgba(0,243,255,0.4);">
+    LEARN FOREX
+  </h1>
+  <p style="font-size:18px; letter-spacing:6px; color:var(--muted); margin-top:14px; text-transform:uppercase;">
+    From Zero to Understanding — Step by Step
+  </p>
+  <p style="color:var(--muted); max-width:640px; margin:28px auto 0; font-size:16px; line-height:1.8;">
+    No jargon. No confusing charts. Just clear, simple explanations that make sense.<br>
+    Taught like you're learning it for the first time — because you are.
+  </p>
+</div>
+
+<a href="/synthetic" style="display:block; text-decoration:none; margin-bottom:50px;">
+  <div class="glass" style="padding:22px 26px; border:1px solid rgba(251,146,60,0.45); background:linear-gradient(135deg, rgba(251,146,60,0.10), rgba(0,212,230,0.04)); border-radius:14px; transition:.3s; cursor:pointer; position:relative; overflow:hidden;"
+       onmouseover="this.style.borderColor='rgba(251,146,60,0.95)'; this.style.boxShadow='0 20px 50px rgba(0,0,0,0.6), 0 0 40px rgba(251,146,60,0.18)';"
+       onmouseout="this.style.borderColor='rgba(251,146,60,0.45)'; this.style.boxShadow='none';">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:20px; flex-wrap:wrap;">
+      <div style="flex:1; min-width:260px;">
+        <div style="font-family:var(--font-cyber); font-size:11px; letter-spacing:3px; color:#fb923c; margin-bottom:8px;">
+          ⚡ NEW · SYNTHETIC INDICES SCANNER
+        </div>
+        <div style="font-family:var(--font-cyber); font-size:20px; letter-spacing:2px; color:#e6ecf5; margin-bottom:8px;">
+          Volatility · Jump · Boom · Crash · Step
+        </div>
+        <div style="font-size:13px; color:#c8d0dc; line-height:1.6; max-width:640px;">
+          Separate engine for Deriv synthetics. Mean-reversion on Volatility/Jump, spike-fade on Boom/Crash, range-fade on Step.
+          Live data straight from Deriv's WebSocket.
+        </div>
+      </div>
+      <div style="font-size:36px; color:#fb923c; flex-shrink:0;">→</div>
+    </div>
+  </div>
+</a>
+
+{% for module_name, lessons in modules.items() %}
+{% set meta = (modules_meta[module_name] if (modules_meta is defined and module_name in modules_meta) else {}) %}
+{% set emoji = meta.emoji | default('📘') %}
+{% set color = meta.color | default('#00d4e6') %}
+<div style="margin-bottom:60px;">
+  <div style="display:flex; align-items:center; gap:16px; margin-bottom:24px;">
+    <div style="font-size:32px;">{{ emoji }}</div>
+    <div>
+      <div style="font-family:var(--font-cyber); font-size:22px; letter-spacing:4px; color:{{ color }}; text-shadow:0 0 15px {{ color }}66;">
+        {{ module_name | upper }}
+      </div>
+      <div style="font-size:13px; color:var(--muted); letter-spacing:2px;">{{ lessons|length }} LESSONS</div>
+    </div>
+    <div style="flex:1; height:1px; background:linear-gradient(90deg, {{ color }}66, transparent);"></div>
+  </div>
+
+  <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:20px;">
+    {% for lesson in lessons %}
+    <a href="/lesson/{{ lesson.slug }}" class="glass lesson-card" style="padding:24px; display:block; transition:all .3s; position:relative; overflow:hidden;">
+      <div style="display:flex; align-items:flex-start; gap:16px;">
+        <div style="font-size:36px; flex-shrink:0;">{{ lesson.emoji }}</div>
+        <div style="flex:1;">
+          <div style="font-size:11px; color:var(--muted); letter-spacing:2px; margin-bottom:6px;">LESSON {{ lesson.number }}</div>
+          <div style="font-family:var(--font-cyber); font-size:16px; color:#fff; letter-spacing:1px; margin-bottom:6px; line-height:1.3;">
+            {{ lesson.title }}
+          </div>
+          <div style="font-size:13px; color:var(--muted); line-height:1.5;">{{ lesson.subtitle }}</div>
+        </div>
+      </div>
+      <div class="lesson-progress" data-slug="{{ lesson.slug }}" style="position:absolute; top:12px; right:16px; font-size:18px; opacity:0; transition:.3s;">✅</div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endfor %}
+
+<div class="glass" style="padding:40px; text-align:center; border:1px solid rgba(0,255,136,0.3); background:linear-gradient(135deg, rgba(0,255,136,0.05), rgba(0,243,255,0.05));">
+  <h2 style="font-family:var(--font-cyber); font-size:24px; letter-spacing:4px; margin:0 0 12px 0; color:var(--green);">
+    READY TO PRACTICE?
+  </h2>
+  <p style="color:var(--muted); max-width:600px; margin:0 auto 24px; font-size:15px;">
+    Before trading real money, learn to size your trades and calculate risk properly.
+  </p>
+  <a href="/calculator" class="btn-neon" style="border-color:var(--green); background:linear-gradient(180deg, rgba(0,255,136,0.2), rgba(0,255,136,0.02));">
+    OPEN CALCULATORS →
+  </a>
+</div>
+
+<style>
+  .lesson-card:hover {
+    transform: translateY(-6px);
+    border-color: var(--cyan);
+    box-shadow: 0 20px 50px rgba(0,0,0,0.8), 0 0 40px rgba(0,243,255,0.15);
+  }
+  .lesson-progress.visible { opacity: 1; }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.lesson-card').forEach(card => {
+  const slug = card.querySelector('.lesson-progress').getAttribute('data-slug');
+  if (localStorage.getItem('forex_completed_' + slug) === '1') {
+    card.querySelector('.lesson-progress').classList.add('visible');
+  }
+});
+</script>
+{% endblock %}

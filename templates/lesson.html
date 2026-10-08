@@ -1,0 +1,436 @@
+{% extends "base.html" %}
+{% block title %}{{ lesson.title }} | Forex Academy{% endblock %}
+
+{% block head %}
+<style>
+  .chart-anim { width: 100%; height: 400px; background: #060810; border: 1px solid rgba(0, 212, 230, 0.15); border-radius: 12px; margin: 0 0 20px 0; display: block; }
+  .chart-anim-title { font-family: var(--font-cyber); font-size: 12px; letter-spacing: 3px; color: var(--cyan); margin-bottom: 12px; text-transform: uppercase; }
+  .chart-anim-title::before { content: "📊 "; }
+  
+  .steps-panel { background: #0a0c12; border: 1px solid rgba(0,212,230,0.15); border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; }
+  .steps-panel h4 { font-family: var(--font-cyber); font-size: 11px; letter-spacing: 2px; color: var(--cyan); margin: 0 0 12px 0; text-transform: uppercase; }
+  .steps-panel ol { margin: 0; padding-left: 20px; }
+  .steps-panel li { padding: 4px 0; font-size: 15px; color: #c8d0dc; line-height: 1.6; }
+  
+  .yt-search { display: inline-flex; align-items: center; gap: 10px; padding: 12px 20px; background: rgba(255,0,0,0.08); border: 1px solid rgba(255,0,0,0.3); border-radius: 8px; color: #fff; font-family: var(--font-cyber); font-size: 11px; letter-spacing: 2px; text-decoration: none; transition: all 0.3s; margin-bottom: 20px; text-transform: uppercase; }
+  .yt-search:hover { background: rgba(255,0,0,0.15); transform: translateY(-2px); }
+  .yt-search svg { width: 18px; height: 18px; fill: #ff0000; }
+  
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes growCandle { from { opacity: 0; transform: scaleY(0); } to { opacity: 1; transform: scaleY(1); } }
+  @keyframes drawLine { from { stroke-dashoffset: 800; } to { stroke-dashoffset: 0; } }
+  @keyframes pulsePoint { 0%,100% { r: 5; opacity: 0.7; } 50% { r: 7; opacity: 1; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<a href="/" style="color:var(--cyan); font-size:13px; letter-spacing:2px; display:inline-block; margin-bottom:20px;">&larr; BACK TO CURRICULUM</a>
+
+<div style="display:grid; grid-template-columns:1fr 260px; gap:30px;" class="lesson-layout">
+  <div>
+    <div style="margin-bottom:28px;">
+      <div style="font-size:12px; color:var(--muted); letter-spacing:3px; margin-bottom:6px;">
+        LESSON {{ lesson.number }} · {{ lesson.module | upper }}
+      </div>
+      <h1 style="font-family:var(--font-cyber); font-size:34px; letter-spacing:3px; margin:0 0 8px 0; line-height:1.2;">
+        {{ lesson.emoji }} {{ lesson.title }}
+      </h1>
+      <p style="font-size:16px; color:var(--cyan); letter-spacing:1px; margin:0 0 14px 0;">{{ lesson.subtitle }}</p>
+      
+      {% if lesson.youtube_search %}
+      <a href="https://www.youtube.com/results?search_query={{ lesson.youtube_search | urlencode }}" target="_blank" class="yt-search">
+        <svg viewBox="0 0 24 24"><path d="M23.5,6.2c-0.3-1.1-1.1-1.9-2.2-2.2C19.4,3.5,12,3.5,12,3.5s-7.4,0-9.3,0.5C1.6,4.3,0.8,5.1,0.5,6.2C0,8.1,0,12,0,12s0,3.9,0.5,5.8c0.3,1.1,1.1,1.9,2.2,2.2C4.6,20.5,12,20.5,12,20.5s7.4,0,9.3-0.5c1.1-0.3,1.9-1.1,2.2-2.2c0.5-1.9,0.5-5.8,0.5-5.8S24,8.1,23.5,6.2z M9.5,15.5v-7l6.5,3.5L9.5,15.5z"/></svg>
+        WATCH VIDEO TUTORIALS
+      </a>
+      {% endif %}
+    </div>
+
+    <div class="glass" style="padding:32px;">
+      {% for block in lesson.content %}
+        {% if block.type == 'text' %}
+        <p style="font-size:16px; line-height:1.85; color:#c8d0dc; margin:0 0 22px 0;">{{ block.body | safe }}</p>
+        
+        {% elif block.type == 'analogy' %}
+        <div style="background:rgba(122,78,224,0.08); border-left:4px solid var(--violet); border-radius:10px; padding:22px; margin:0 0 24px 0;">
+          <div style="font-size:32px; margin-bottom:10px;">{{ block.emoji }}</div>
+          <div style="font-size:13px; letter-spacing:2px; color:var(--violet); font-family:var(--font-cyber); margin-bottom:8px;">ANALOGY</div>
+          <p style="font-size:15px; line-height:1.8; color:#c8d0dc; margin:0;">{{ block.body | safe }}</p>
+        </div>
+        
+        {% elif block.type == 'key-points' %}
+        <div style="background:rgba(0,212,230,0.04); border:1px solid rgba(0,212,230,0.15); border-radius:10px; padding:22px; margin:0 0 24px 0;">
+          <div style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin-bottom:14px;">{{ block.title | safe }}</div>
+          <ul style="margin:0; padding-left:0; list-style:none;">
+            {% for point in block.points %}
+            <li style="position:relative; padding-left:22px; margin-bottom:12px; line-height:1.7; font-size:15px; color:#c8d0dc;">
+              <span style="position:absolute; left:0; top:0; color:var(--cyan);">▸</span>
+              {{ point | safe }}
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        
+        {% elif block.type == 'example-box' %}
+        <div style="background:#0a0c12; border:1px solid rgba(230,184,0,0.25); border-radius:10px; padding:22px; margin:0 0 24px 0;">
+          <div style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--gold); margin-bottom:14px;">📋 {{ block.title }}</div>
+          <div style="font-family:'Courier New', monospace; font-size:13px; line-height:1.9; color:#c8d0dc;">
+            {% for line in block.lines %}
+            <div style="{% if line == '' %}height:8px;{% endif %}">{{ line | safe }}</div>
+            {% endfor %}
+          </div>
+        </div>
+        
+        {% elif block.type == 'tip' %}
+        <div style="background:rgba(34,197,94,0.06); border-left:4px solid var(--green); border-radius:10px; padding:18px; margin:0 0 24px 0;">
+          <div style="font-size:22px; margin-bottom:6px;">{{ block.emoji }}</div>
+          <p style="font-size:15px; line-height:1.75; color:#c8d0dc; margin:0;">{{ block.body | safe }}</p>
+        </div>
+        
+        {% elif block.type == 'warning' %}
+        <div style="background:rgba(220,38,38,0.08); border-left:4px solid var(--red); border-radius:10px; padding:18px; margin:0 0 24px 0;">
+          <div style="font-size:22px; margin-bottom:6px;">{{ block.emoji }}</div>
+          <p style="font-size:15px; line-height:1.75; color:#c8d0dc; margin:0;">{{ block.body | safe }}</p>
+        </div>
+        {% endif %}
+      {% endfor %}
+      
+      {% if animation %}
+      <div style="margin-top:36px; padding-top:28px; border-top:1px solid rgba(255,255,255,0.08);">
+        <div class="chart-anim-title">{{ animation.title }}</div>
+        <svg id="chartAnim" class="chart-anim" viewBox="0 0 800 400" preserveAspectRatio="xMidYMid meet"></svg>
+        <div style="display:flex; justify-content:center; gap:12px; margin-top:12px; margin-bottom:20px;">
+          <button onclick="replayChart()" class="btn-neon" style="padding:8px 20px; font-size:11px;">↻ REPLAY ANIMATION</button>
+        </div>
+        
+        {% if animation.steps %}
+        <div class="steps-panel">
+          <h4>📝 What You're Seeing</h4>
+          <ol>
+            {% for step in animation.steps %}
+            <li>{{ step }}</li>
+            {% endfor %}
+          </ol>
+        </div>
+        {% endif %}
+      </div>
+      <script id="chartData" type="application/json">{{ animation | tojson }}</script>
+      {% endif %}
+      
+      <div style="margin-top:36px; padding-top:28px; border-top:1px solid rgba(255,255,255,0.08);">
+        <div style="font-family:var(--font-cyber); font-size:13px; letter-spacing:3px; color:var(--gold); margin-bottom:14px;">🧠 QUICK QUIZ</div>
+        <div style="font-size:16px; margin-bottom:18px; line-height:1.7;">{{ lesson.quiz.question }}</div>
+        
+        <div id="quizOptions" style="display:flex; flex-direction:column; gap:10px;">
+          {% for opt in lesson.quiz.options %}
+          <button onclick="checkAnswer({{ loop.index0 }}, {{ lesson.quiz.correct }})" class="quiz-option" style="text-align:left; padding:14px 18px; background:#0a0c12; border:1px solid rgba(255,255,255,0.08); border-radius:8px; color:#c8d0dc; font-family:var(--font-body); font-size:15px; cursor:pointer; transition:.3s;">
+            {{ ['A','B','C','D'][loop.index0] }}) {{ opt }}
+          </button>
+          {% endfor %}
+        </div>
+        
+        <div id="quizResult" style="display:none; margin-top:18px; padding:18px; border-radius:10px; font-size:15px; line-height:1.7;"></div>
+      </div>
+    </div>
+
+    <div style="display:flex; justify-content:space-between; margin-top:26px; gap:14px; flex-wrap:wrap;">
+      <a href="/" class="btn-neon" style="border-color:var(--muted); background:rgba(255,255,255,0.02);">← ALL LESSONS</a>
+      {% if next_lesson %}
+      <a href="/lesson/{{ next_lesson[0] }}" class="btn-neon">NEXT: {{ next_lesson[1].title | upper }} →</a>
+      {% else %}
+      <a href="/calculator" class="btn-neon" style="border-color:var(--green); background:rgba(34,197,94,0.08);">🎉 ALL DONE → CALCULATORS</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div>
+    <div class="glass" style="padding:22px; position:sticky; top:100px;">
+      <div style="font-family:var(--font-cyber); font-size:11px; letter-spacing:3px; color:var(--cyan); margin-bottom:14px;">YOUR PROGRESS</div>
+      <div style="width:100%; height:6px; background:rgba(0,0,0,0.5); border-radius:4px; overflow:hidden; margin-bottom:10px;">
+        <div id="progressFill" style="height:100%; width:0%; background:var(--cyan); border-radius:4px; transition:width .5s ease;"></div>
+      </div>
+      <div id="progressText" style="font-size:12px; color:var(--muted); letter-spacing:1px; margin-bottom:18px;">0 of 23 lessons complete</div>
+      
+      <div style="border-top:1px solid rgba(255,255,255,0.08); padding-top:14px;">
+        <div style="font-size:11px; color:var(--muted); letter-spacing:2px; margin-bottom:8px;">MODULE</div>
+        <div style="font-size:13px; color:#e6ecf5;">{{ lesson.module }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  @media (max-width: 900px) { .lesson-layout { grid-template-columns: 1fr !important; } }
+  .quiz-option:hover { border-color: var(--cyan); background: rgba(0,212,230,0.05); }
+  .quiz-option.correct { border-color: var(--green); background: rgba(34,197,94,0.12); }
+  .quiz-option.wrong { border-color: var(--red); background: rgba(220,38,38,0.12); }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const colorMap = {
+  red: { stroke: '#dc2626', fill: 'rgba(220,38,38,0.15)' },
+  green: { stroke: '#22c55e', fill: 'rgba(34,197,94,0.15)' },
+  cyan: { stroke: '#00d4e6', fill: 'rgba(0,212,230,0.15)' },
+  violet: { stroke: '#7a4ee0', fill: 'rgba(122,78,224,0.15)' },
+  gold: { stroke: '#e6b800', fill: 'rgba(230,184,0,0.15)' },
+  muted: { stroke: '#6b7280', fill: 'rgba(107,114,128,0.15)' }
+};
+
+function renderChart(spec) {
+  const svg = document.getElementById('chartAnim');
+  if (!svg || !spec || !spec.candles) return;
+  svg.innerHTML = '';
+  
+  const W = 800, H = 400, PAD = 60, RIGHT_PAD = 140;
+  const candles = spec.candles;
+  const zones = spec.zones || [];
+  const markers = spec.markers || [];
+  const lines = spec.lines || [];
+  const annotations = spec.annotations || [];
+  
+  // Calculate price range from candles + zones + lines + annotations
+  let minPrice = Infinity, maxPrice = -Infinity;
+  candles.forEach(c => { minPrice = Math.min(minPrice, c.l); maxPrice = Math.max(maxPrice, c.h); });
+  zones.forEach(z => { minPrice = Math.min(minPrice, z.bottom); maxPrice = Math.max(maxPrice, z.top); });
+  lines.forEach(l => { minPrice = Math.min(minPrice, l.price); maxPrice = Math.max(maxPrice, l.price); });
+  annotations.forEach(a => { minPrice = Math.min(minPrice, a.price); maxPrice = Math.max(maxPrice, a.price); });
+  
+  const range = maxPrice - minPrice || 1;
+  const padRange = range * 0.2;
+  minPrice -= padRange; maxPrice += padRange;
+  const priceRange = maxPrice - minPrice;
+  
+  const priceToY = (p) => PAD + (1 - (p - minPrice) / priceRange) * (H - 2 * PAD);
+  const chartWidth = W - PAD - RIGHT_PAD;
+  const idxToX = (i) => PAD + 30 + i * ((chartWidth - 30) / Math.max(candles.length - 1, 1));
+  
+  // Grid lines
+  for (let g = 0; g <= 5; g++) {
+    const y = PAD + g * ((H - 2 * PAD) / 5);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', PAD); line.setAttribute('x2', W - RIGHT_PAD);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('stroke', 'rgba(255,255,255,0.04)');
+    svg.appendChild(line);
+  }
+  
+  // Zones
+  zones.forEach((z, zIdx) => {
+    const x1 = idxToX(z.start), x2 = idxToX(z.end);
+    const y1 = priceToY(z.top), y2 = priceToY(z.bottom);
+    const c = colorMap[z.color] || colorMap.cyan;
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', x1); rect.setAttribute('y', y1);
+    rect.setAttribute('width', x2 - x1); rect.setAttribute('height', Math.max(y2 - y1, 2));
+    rect.setAttribute('fill', c.fill);
+    rect.setAttribute('stroke', c.stroke);
+    rect.setAttribute('stroke-width', '1.5');
+    rect.setAttribute('stroke-dasharray', '5 4');
+    rect.setAttribute('opacity', '0');
+    rect.style.animation = `fadeIn 0.6s ease ${0.2 + zIdx * 0.1}s forwards`;
+    svg.appendChild(rect);
+    
+    if (z.label) {
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', x1 + 6); label.setAttribute('y', y1 - 6);
+      label.setAttribute('fill', c.stroke);
+      label.setAttribute('font-family', 'Orbitron, sans-serif');
+      label.setAttribute('font-size', '10');
+      label.setAttribute('letter-spacing', '1');
+      label.setAttribute('opacity', '0');
+      label.textContent = z.label;
+      label.style.animation = `fadeIn 0.6s ease ${0.3 + zIdx * 0.1}s forwards`;
+      svg.appendChild(label);
+    }
+  });
+  
+  // Horizontal lines (entry, SL, TP)
+  lines.forEach((l, lIdx) => {
+    const y = priceToY(l.price);
+    const c = colorMap[l.color] || colorMap.cyan;
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', PAD); line.setAttribute('x2', W - RIGHT_PAD);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('stroke', c.stroke);
+    line.setAttribute('stroke-width', l.dashed ? '1' : '2');
+    if (l.dashed) line.setAttribute('stroke-dasharray', '6 4');
+    line.setAttribute('opacity', '0');
+    line.style.animation = `fadeIn 0.5s ease ${0.5 + lIdx * 0.1}s forwards`;
+    svg.appendChild(line);
+    
+    // Right-side label
+    if (l.label) {
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', W - RIGHT_PAD + 6); label.setAttribute('y', y + 4);
+      label.setAttribute('fill', c.stroke);
+      label.setAttribute('font-family', 'Rajdhani, sans-serif');
+      label.setAttribute('font-size', '12');
+      label.setAttribute('font-weight', '600');
+      label.setAttribute('opacity', '0');
+      label.textContent = l.label;
+      label.style.animation = `fadeIn 0.5s ease ${0.6 + lIdx * 0.1}s forwards`;
+      svg.appendChild(label);
+    }
+  });
+  
+  // Candles
+  candles.forEach((c, i) => {
+    const x = idxToX(i);
+    const isGreen = c.c > c.o;
+    const color = isGreen ? '#22c55e' : '#dc2626';
+    const highlight = c.highlight === 'ob_bull' ? '#00d4e6' : color;
+    const delay = 0.7 + i * 0.06;
+    const candleWidth = Math.min(16, (chartWidth / candles.length) * 0.6);
+    
+    // Wick
+    const wick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    wick.setAttribute('x1', x); wick.setAttribute('x2', x);
+    wick.setAttribute('y1', priceToY(c.h)); wick.setAttribute('y2', priceToY(c.l));
+    wick.setAttribute('stroke', highlight); wick.setAttribute('stroke-width', '1.5');
+    wick.setAttribute('opacity', '0');
+    wick.style.animation = `fadeIn 0.25s ease ${delay}s forwards`;
+    svg.appendChild(wick);
+    
+    // Body
+    const bodyTop = priceToY(Math.max(c.o, c.c));
+    const bodyBottom = priceToY(Math.min(c.o, c.c));
+    const bodyHeight = Math.max(bodyBottom - bodyTop, 2);
+    const body = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    body.setAttribute('x', x - candleWidth / 2); body.setAttribute('y', bodyTop);
+    body.setAttribute('width', candleWidth); body.setAttribute('height', bodyHeight);
+    body.setAttribute('fill', highlight); body.setAttribute('stroke', highlight);
+    body.setAttribute('opacity', '0');
+    body.style.animation = `growCandle 0.3s ease ${delay}s forwards`;
+    body.style.transformOrigin = `${x}px ${bodyBottom}px`;
+    svg.appendChild(body);
+  });
+  
+  // Markers (existing, arrows with labels)
+  markers.forEach((m, mIdx) => {
+    const x = idxToX(m.index);
+    const y = m.type === 'arrow_up' ? H - 100 : 100;
+    const color = m.type === 'arrow_up' ? '#22c55e' : '#ff8800';
+    const marker = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    marker.setAttribute('x', x); marker.setAttribute('y', y);
+    marker.setAttribute('text-anchor', 'middle');
+    marker.setAttribute('fill', color);
+    marker.setAttribute('font-family', 'Orbitron, sans-serif');
+    marker.setAttribute('font-size', '11');
+    marker.setAttribute('font-weight', 'bold');
+    marker.setAttribute('opacity', '0');
+    marker.textContent = (m.type === 'arrow_up' ? '▲ ' : '▼ ') + m.label;
+    marker.style.animation = `fadeIn 0.4s ease ${1.4 + mIdx * 0.25}s forwards`;
+    svg.appendChild(marker);
+  });
+  
+  // NEW: Annotations — text with pointer lines to specific candles
+  annotations.forEach((a, aIdx) => {
+    const x = idxToX(a.index);
+    const yPrice = priceToY(a.price);
+    const c = colorMap[a.color] || colorMap.cyan;
+    
+    // Determine label position
+    const isAbove = a.position === 'above';
+    const labelY = isAbove ? yPrice - 40 : yPrice + 55;
+    const labelX = Math.max(PAD + 10, Math.min(x, W - RIGHT_PAD - 200));
+    
+    // Pointer line
+    const pointer = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    pointer.setAttribute('x1', x); pointer.setAttribute('y1', yPrice);
+    pointer.setAttribute('x2', labelX + 8); pointer.setAttribute('y2', isAbove ? labelY + 8 : labelY - 12);
+    pointer.setAttribute('stroke', c.stroke);
+    pointer.setAttribute('stroke-width', '1.5');
+    pointer.setAttribute('opacity', '0');
+    pointer.style.animation = `fadeIn 0.4s ease ${1.0 + aIdx * 0.25}s forwards`;
+    svg.appendChild(pointer);
+    
+    // Dot at the price point
+    const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('cx', x); dot.setAttribute('cy', yPrice);
+    dot.setAttribute('r', 5);
+    dot.setAttribute('fill', c.stroke);
+    dot.setAttribute('opacity', '0');
+    dot.style.animation = `fadeIn 0.4s ease ${1.0 + aIdx * 0.25}s forwards, pulsePoint 2s ease-in-out ${1.4 + aIdx * 0.25}s infinite`;
+    svg.appendChild(dot);
+    
+    // Text label with background
+    const textBg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    const textWidth = a.text.length * 6.5 + 16;
+    textBg.setAttribute('x', labelX - 8);
+    textBg.setAttribute('y', isAbove ? labelY - 4 : labelY - 4);
+    textBg.setAttribute('width', textWidth);
+    textBg.setAttribute('height', 22);
+    textBg.setAttribute('rx', 4);
+    textBg.setAttribute('fill', c.fill);
+    textBg.setAttribute('stroke', c.stroke);
+    textBg.setAttribute('stroke-width', '1');
+    textBg.setAttribute('opacity', '0');
+    textBg.style.animation = `fadeIn 0.4s ease ${1.2 + aIdx * 0.25}s forwards`;
+    svg.appendChild(textBg);
+    
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', labelX);
+    label.setAttribute('y', (isAbove ? labelY : labelY) + 10);
+    label.setAttribute('fill', c.stroke);
+    label.setAttribute('font-family', 'Rajdhani, sans-serif');
+    label.setAttribute('font-size', '13');
+    label.setAttribute('font-weight', '600');
+    label.setAttribute('opacity', '0');
+    label.textContent = a.text;
+    label.style.animation = `fadeIn 0.4s ease ${1.2 + aIdx * 0.25}s forwards`;
+    svg.appendChild(label);
+  });
+}
+
+function replayChart() {
+  const data = document.getElementById('chartData');
+  if (data) renderChart(JSON.parse(data.textContent));
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const data = document.getElementById('chartData');
+  if (data) setTimeout(() => renderChart(JSON.parse(data.textContent)), 300);
+});
+
+function getCompleted() {
+  const c = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k.startsWith('forex_completed_') && localStorage.getItem(k) === '1') c.push(k);
+  }
+  return c;
+}
+
+function updateProgress() {
+  const total = 23;
+  const completed = getCompleted().length;
+  document.getElementById('progressFill').style.width = ((completed / total) * 100) + '%';
+  document.getElementById('progressText').textContent = `${completed} of ${total} lessons complete`;
+}
+updateProgress();
+
+function checkAnswer(selected, correct) {
+  const buttons = document.querySelectorAll('.quiz-option');
+  buttons.forEach((btn, i) => {
+    btn.disabled = true; btn.style.cursor = 'default';
+    if (i === correct) btn.classList.add('correct');
+    if (i === selected && i !== correct) btn.classList.add('wrong');
+  });
+  const result = document.getElementById('quizResult');
+  const explanation = {{ lesson.quiz.explanation | tojson }};
+  result.style.display = 'block';
+  if (selected === correct) {
+    result.style.background = 'rgba(34,197,94,0.1)';
+    result.style.border = '1px solid var(--green)';
+    result.innerHTML = `<div style="color:var(--green); font-family:var(--font-cyber); letter-spacing:2px; margin-bottom:8px;">✅ CORRECT!</div>${explanation}`;
+    localStorage.setItem('forex_completed_{{ slug }}', '1');
+    updateProgress();
+  } else {
+    result.style.background = 'rgba(220,38,38,0.1)';
+    result.style.border = '1px solid var(--red)';
+    result.innerHTML = `<div style="color:var(--red); font-family:var(--font-cyber); letter-spacing:2px; margin-bottom:8px;">❌ NOT QUITE</div>${explanation}`;
+  }
+}
+</script>
+{% endblock %}

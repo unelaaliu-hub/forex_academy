@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}Trading Calculators | Forex Academy{% endblock %}
+
+{% block head %}
+<style>
+  .calc-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(340px, 1fr)); gap:24px; }
+  .calc-card { padding:32px; }
+  .calc-title { font-family:var(--font-cyber); font-size:16px; letter-spacing:3px; color:var(--cyan); margin:0 0 20px 0; }
+  .input-group { margin-bottom:16px; }
+  .input-group label { display:block; font-size:13px; color:var(--muted); letter-spacing:1.5px; margin-bottom:8px; text-transform:uppercase; }
+  .input-group input, .input-group select { width:100%; padding:14px 18px; background:rgba(0,0,0,0.4); border:1px solid var(--stroke); border-radius:10px; color:#fff; font-family:var(--font-body); font-size:16px; outline:none; transition:.3s; }
+  .input-group input:focus, .input-group select:focus { border-color:var(--cyan); box-shadow:0 0 20px rgba(0,243,255,0.2); }
+  .result-box { margin-top:24px; padding:20px; background:linear-gradient(135deg, rgba(0,243,255,0.08), rgba(138,43,226,0.05)); border:1px solid var(--cyan); border-radius:12px; }
+  .result-row { display:flex; justify-content:space-between; padding:10px 0; border-bottom:1px solid rgba(255,255,255,0.06); }
+  .result-row:last-child { border-bottom:none; }
+  .result-label { color:var(--muted); font-size:14px; letter-spacing:1px; }
+  .result-value { color:#fff; font-weight:700; font-family:var(--font-cyber); font-size:16px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="text-align:center; margin-bottom:40px;">
+  <h1 style="font-family:var(--font-cyber); font-size:44px; letter-spacing:6px; margin:0; text-shadow:0 0 30px rgba(0,243,255,0.4);">
+    🧮 CALCULATORS
+  </h1>
+  <p style="color:var(--muted); margin-top:12px; letter-spacing:3px;">POSITION SIZING · RISK · REWARD</p>
+</div>
+
+<div class="calc-grid">
+  <div class="glass calc-card">
+    <h2 class="calc-title">📊 POSITION SIZE</h2>
+    <div class="input-group"><label>Account Balance ($)</label><input type="number" id="psBalance" value="1000" oninput="calcPositionSize()"></div>
+    <div class="input-group"><label>Risk per Trade (%)</label><input type="number" id="psRisk" value="1" step="0.1" oninput="calcPositionSize()"></div>
+    <div class="input-group"><label>Stop Loss (pips)</label><input type="number" id="psSL" value="20" oninput="calcPositionSize()"></div>
+    <div class="input-group"><label>Currency Pair</label>
+      <select id="psPair" onchange="calcPositionSize()">
+        <option value="10">EUR/USD / GBP/USD / Gold</option>
+        <option value="6.7">USD/JPY</option>
+      </select>
+    </div>
+    <div class="result-box">
+      <div class="result-row"><span class="result-label">Risk Amount</span><span class="result-value" id="psRiskAmt">$10.00</span></div>
+      <div class="result-row"><span class="result-label">Value per Pip</span><span class="result-value" id="psPipVal">$0.50</span></div>
+      <div class="result-row"><span class="result-label">Standard Lots</span><span class="result-value" id="psStdLots">0.05</span></div>
+      <div class="result-row"><span class="result-label">Mini Lots</span><span class="result-value" id="psMiniLots">0.5</span></div>
+      <div class="result-row"><span class="result-label">Micro Lots</span><span class="result-value" id="psMicroLots">5</span></div>
+    </div>
+  </div>
+
+  <div class="glass calc-card">
+    <h2 class="calc-title">⚖️ RISK : REWARD</h2>
+    <div class="input-group"><label>Entry Price</label><input type="number" id="rrEntry" value="1.0850" step="0.0001" oninput="calcRR()"></div>
+    <div class="input-group"><label>Stop Loss</label><input type="number" id="rrSL" value="1.0830" step="0.0001" oninput="calcRR()"></div>
+    <div class="input-group"><label>Take Profit</label><input type="number" id="rrTP" value="1.0900" step="0.0001" oninput="calcRR()"></div>
+    <div class="result-box">
+      <div class="result-row"><span class="result-label">Risk (pips)</span><span class="result-value" id="rrRisk">20.0</span></div>
+      <div class="result-row"><span class="result-label">Reward (pips)</span><span class="result-value" id="rrReward">50.0</span></div>
+      <div class="result-row"><span class="result-label">R:R Ratio</span><span class="result-value" id="rrRatio">1 : 2.5</span></div>
+      <div class="result-row"><span class="result-label">Verdict</span><span class="result-value" id="rrVerdict">✅ GOOD TRADE</span></div>
+    </div>
+  </div>
+
+  <div class="glass calc-card">
+    <h2 class="calc-title">💵 PIP VALUE</h2>
+    <div class="input-group"><label>Lot Size</label>
+      <select id="pvLot" onchange="calcPipValue()">
+        <option value="100000">Standard (100,000)</option>
+        <option value="10000">Mini (10,000)</option>
+        <option value="1000">Micro (1,000)</option>
+        <option value="100">Nano (100)</option>
+      </select>
+    </div>
+    <div class="input-group"><label>Pair</label>
+      <select id="pvPair" onchange="calcPipValue()">
+        <option value="1">USD-quoted (EUR/USD)</option>
+        <option value="0.67">JPY-quoted (USD/JPY)</option>
+      </select>
+    </div>
+    <div class="result-box">
+      <div class="result-row"><span class="result-label">1 Pip = </span><span class="result-value" id="pvResult">$10.00</span></div>
+    </div>
+  </div>
+
+  <div class="glass calc-card">
+    <h2 class="calc-title">📈 GROWTH PROJECTION</h2>
+    <div class="input-group"><label>Starting Balance ($)</label><input type="number" id="grBalance" value="1000" oninput="calcGrowth()"></div>
+    <div class="input-group"><label>Avg Monthly Return (%)</label><input type="number" id="grReturn" value="5" step="0.5" oninput="calcGrowth()"></div>
+    <div class="input-group"><label>Months</label><input type="number" id="grMonths" value="12" oninput="calcGrowth()"></div>
+    <div class="result-box">
+      <div class="result-row"><span class="result-label">Final Balance</span><span class="result-value" id="grFinal">$1,795.86</span></div>
+      <div class="result-row"><span class="result-label">Total Gain</span><span class="result-value" id="grGain">+$795.86</span></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function calcPositionSize() {
+    const b = parseFloat(document.getElementById('psBalance').value) || 0;
+    const r = parseFloat(document.getElementById('psRisk').value) || 0;
+    const sl = parseFloat(document.getElementById('psSL').value) || 1;
+    const pv = parseFloat(document.getElementById('psPair').value) || 10;
+    const risk = (b * r) / 100;
+    const pipVal = risk / sl;
+    const std = pipVal / pv;
+    document.getElementById('psRiskAmt').textContent = '$' + risk.toFixed(2);
+    document.getElementById('psPipVal').textContent = '$' + pipVal.toFixed(2);
+    document.getElementById('psStdLots').textContent = std.toFixed(3);
+    document.getElementById('psMiniLots').textContent = (std * 10).toFixed(2);
+    document.getElementById('psMicroLots').textContent = (std * 100).toFixed(2);
+  }
+  calcPositionSize();
+  
+  function calcRR() {
+    const e = parseFloat(document.getElementById('rrEntry').value) || 0;
+    const sl = parseFloat(document.getElementById('rrSL').value) || 0;
+    const tp = parseFloat(document.getElementById('rrTP').value) || 0;
+    const risk = Math.abs(e - sl) * 10000;
+    const reward = Math.abs(tp - e) * 10000;
+    const ratio = risk > 0 ? reward / risk : 0;
+    document.getElementById('rrRisk').textContent = risk.toFixed(1);
+    document.getElementById('rrReward').textContent = reward.toFixed(1);
+    document.getElementById('rrRatio').textContent = '1 : ' + ratio.toFixed(2);
+    const v = document.getElementById('rrVerdict');
+    if (ratio >= 2) { v.textContent = '✅ GOOD TRADE'; v.style.color = 'var(--green)'; }
+    else if (ratio >= 1.5) { v.textContent = '⚠️ ACCEPTABLE'; v.style.color = 'var(--gold)'; }
+    else if (ratio >= 1) { v.textContent = '⚠️ RISKY'; v.style.color = 'var(--gold)'; }
+    else { v.textContent = '❌ SKIP THIS'; v.style.color = 'var(--red)'; }
+  }
+  calcRR();
+  
+  function calcPipValue() {
+    const l = parseFloat(document.getElementById('pvLot').value) || 100000;
+    const m = parseFloat(document.getElementById('pvPair').value) || 1;
+    document.getElementById('pvResult').textContent = '$' + ((l / 100000) * 10 * m).toFixed(2);
+  }
+  calcPipValue();
+  
+  function calcGrowth() {
+    const b = parseFloat(document.getElementById('grBalance').value) || 0;
+    const p = parseFloat(document.getElementById('grReturn').value) || 0;
+    const m = parseInt(document.getElementById('grMonths').value) || 0;
+    const f = b * Math.pow(1 + p / 100, m);
+    const g = f - b;
+    document.getElementById('grFinal').textContent = '$' + f.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    document.getElementById('grGain').textContent = (g >= 0 ? '+' : '') + '$' + g.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  }
+  calcGrowth();
+</script>
+{% endblock %}

@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Forex Academy{% endblock %}</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#050608; --bg-card:#0a0c12; --glass:rgba(15,18,28,0.6);
+    --stroke:rgba(0,243,255,0.12); --txt:#c8d0dc; --muted:#6b7280;
+    --cyan:#00d4e6; --violet:#7a4ee0; --gold:#e6b800;
+    --green:#22c55e; --red:#dc2626;
+    --font-cyber:'Orbitron',sans-serif; --font-body:'Rajdhani',sans-serif;
+  }
+  *{box-sizing:border-box}
+  html { background: #050608; }
+  body{margin:0;background:#050608;color:var(--txt);font-family:var(--font-body);font-size:16px;line-height:1.7;min-height:100vh;}
+  a{color:inherit;text-decoration:none}
+
+  .nav{
+    position:sticky; top:0; z-index:50;
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 40px;
+    background:#0a0c12;
+    border-bottom:1px solid rgba(0,212,230,0.15);
+    flex-wrap:wrap; gap:12px;
+  }
+  .nav .brand{
+    font-family:var(--font-cyber);
+    font-weight:900;
+    letter-spacing:.25em;
+    font-size:14px;
+    color:#fff;
+    text-transform:uppercase;
+  }
+  .nav .brand span{ color:var(--cyan); }
+  .nav-links{
+    display:flex; gap:16px; align-items:center;
+    font-size:12px; letter-spacing:1.2px;
+    text-transform:uppercase; font-weight:500;
+    flex-wrap:wrap;
+  }
+  .nav-links a{
+    color:var(--muted);
+    transition:color .3s;
+  }
+  .nav-links a:hover,.nav-links a.active{
+    color:var(--cyan);
+  }
+
+  main{max-width:1200px;margin:0 auto;padding:40px 24px 80px;}
+
+  .glass{background:var(--bg-card);border:1px solid rgba(255,255,255,0.06);border-radius:14px;box-shadow:0 4px 20px rgba(0,0,0,0.4);}
+
+  .btn-neon{
+    display:inline-flex; align-items:center; justify-content:center; gap:8px;
+    padding:12px 24px; border-radius:6px;
+    font-family:var(--font-cyber); font-size:11px; font-weight:700;
+    letter-spacing:1.8px; text-transform:uppercase; cursor:pointer;
+    border:1px solid var(--cyan);
+    background:rgba(0,212,230,0.08);
+    color:#fff; transition:all .25s; text-decoration:none;
+  }
+  .btn-neon:hover{
+    background:rgba(0,212,230,0.18);
+    transform:translateY(-1px);
+  }
+
+  ::-webkit-scrollbar{width:6px}
+  ::-webkit-scrollbar-track{background:#050608}
+  ::-webkit-scrollbar-thumb{background:#1f2530;border-radius:6px;}
+  ::-webkit-scrollbar-thumb:hover{background:#2a3140;}
+
+  h1,h2,h3,h4 { color:#e6ecf5; }
+
+  @keyframes slideInAlert {
+    from { opacity: 0; transform: translateX(40px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+</style>
+{% block head %}{% endblock %}
+</head>
+<body>
+
+<nav class="nav">
+  <a href="/" class="brand">FOREX<span>·ACADEMY</span></a>
+  <div class="nav-links">
+    <a href="/">Curriculum</a>
+    <a href="/scanner">Scanner</a>
+    <a href="/multi-scanner">Multi</a>
+    <a href="/backtest">Backtest</a>
+    <a href="/journal">Journal</a>
+    <a href="/alerts">Alerts</a>
+    <a href="/risk-of-ruin">Risk</a>
+    <a href="/economic-calendar">Calendar</a>
+    <a href="/correlation">Correlation</a>
+    <a href="/prop-firm">Prop Firm</a>
+    <a href="/game">Game</a>
+  </div>
+</nav>
+
+<main>{% block content %}{% endblock %}</main>
+{% block scripts %}{% endblock %}
+
+<script>
+(function() {
+  const KEY_WATCHED = 'forex_watched_pairs';
+  const KEY_ALERTED = 'forex_alerted_setups';
+  const CHECK_INTERVAL = 60;
+
+  function getWatched() {
+    try {
+      const stored = localStorage.getItem(KEY_WATCHED);
+      if (stored) return JSON.parse(stored);
+    } catch(e) {}
+    return ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'BTCUSD', 'ETHUSD'];
+  }
+
+  function getAlerted() {
+    try { return JSON.parse(localStorage.getItem(KEY_ALERTED) || '{}'); }
+    catch(e) { return {}; }
+  }
+  function saveAlerted(a) {
+    try { localStorage.setItem(KEY_ALERTED, JSON.stringify(a)); } catch(e) {}
+  }
+
+  const ALERT_COOLDOWN = 60 * 60 * 1000;
+
+  function playAlertSound() {
+    if (localStorage.getItem('forex_alerts_sound') !== '1') return;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      [523.25, 659.25, 783.99].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        const t = ctx.currentTime + i * 0.12;
+        gain.gain.setValueAtTime(0.08, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+        osc.start(t);
+        osc.stop(t + 0.3);
+      });
+    } catch(e) {}
+  }
+
+  function fireNotification(pair, direction, rr) {
+    const title = `🎯 ${pair} — HIGH ${direction}`;
+    const body = `R:R = 1:${rr.toFixed(1)}. Check the scanner for details.`;
+
+    if (localStorage.getItem('forex_alerts_browser') === '1' && 'Notification' in window && Notification.permission === 'granted') {
+      try {
+        const n = new Notification(title, { body, tag: pair + '_' + direction });
+        n.onclick = () => { window.focus(); window.location.href = '/scanner?symbol=' + pair + '&tf=1h'; };
+      } catch(e) {}
+    }
+
+    playAlertSound();
+
+    const flash = document.createElement('div');
+    flash.style.cssText = `
+      position:fixed; top:120px; right:30px; z-index:9999;
+      padding:16px 22px; background:linear-gradient(90deg,rgba(34,197,94,0.95),rgba(0,212,230,0.9));
+      color:#02040a; font-family:Orbitron,sans-serif; font-weight:700;
+      letter-spacing:1.5px; font-size:13px; border-radius:10px;
+      box-shadow:0 10px 40px rgba(34,197,94,0.5);
+      animation:slideInAlert 0.4s ease; cursor:pointer; max-width:320px;
+    `;
+    flash.innerHTML = `🎯 ${title}<br><span style="font-size:11px; opacity:0.85;">${body}</span>`;
+    flash.onclick = () => { window.location.href = '/scanner?symbol=' + pair + '&tf=1h'; };
+    document.body.appendChild(flash);
+    setTimeout(() => { flash.style.transition = '0.5s'; flash.style.opacity = '0'; setTimeout(() => flash.remove(), 500); }, 8000);
+  }
+
+  async function checkAllPairs() {
+    const pairs = getWatched();
+    const alerted = getAlerted();
+    const now = Date.now();
+
+    for (const pair of pairs) {
+      try {
+        const r = await fetch(`/api/scanner?symbol=${pair}&tf=1h`);
+        if (!r.ok) continue;
+        const data = await r.json();
+        if (data.error) continue;
+
+        for (const dir of ['buy_setup', 'sell_setup']) {
+          const setup = data[dir];
+          if (!setup || setup.confidence !== 'HIGH') continue;
+          const direction = setup.direction;
+          const key = `${pair}_${direction}`;
+          const lastAlert = alerted[key] || 0;
+          if (now - lastAlert > ALERT_COOLDOWN) {
+            fireNotification(pair, direction, setup.rr);
+            alerted[key] = now;
+            saveAlerted(alerted);
+          }
+        }
+      } catch(e) {}
+    }
+  }
+
+  function shouldRun() {
+    return localStorage.getItem('forex_alerts_browser') === '1' ||
+           localStorage.getItem('forex_alerts_sound') === '1';
+  }
+
+  setTimeout(() => { if (shouldRun()) checkAllPairs(); }, 20000);
+  setInterval(() => { if (shouldRun()) checkAllPairs(); }, CHECK_INTERVAL * 1000);
+
+  window.forexAlerts = { checkAllPairs };
+})();
+</script>
+</body>
+</html>

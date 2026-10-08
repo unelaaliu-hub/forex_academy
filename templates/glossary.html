@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Glossary | Forex Academy{% endblock %}
+
+{% block content %}
+<div style="text-align:center; margin-bottom:40px;">
+  <h1 style="font-family:var(--font-cyber); font-size:44px; letter-spacing:6px; margin:0; text-shadow:0 0 30px rgba(0,243,255,0.4);">
+    📖 GLOSSARY
+  </h1>
+  <p style="color:var(--muted); margin-top:12px; letter-spacing:3px;">EVERY TRADING TERM EXPLAINED SIMPLY</p>
+</div>
+
+<div style="margin-bottom:24px;">
+  <input type="text" id="searchBox" placeholder="Search terms..." onkeyup="filterTerms()" style="width:100%; padding:16px 24px; background:rgba(0,0,0,0.4); border:1px solid var(--stroke); border-radius:12px; color:#fff; font-family:var(--font-body); font-size:16px; outline:none; transition:.3s;">
+</div>
+
+<div class="glass" style="padding:32px;">
+  {% for item in glossary %}
+  <div class="term-item" style="padding:20px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+    <div style="font-family:var(--font-cyber); font-size:16px; color:var(--cyan); letter-spacing:2px; margin-bottom:6px;">{{ item.term }}</div>
+    <div style="color:#dde3ec; font-size:16px; line-height:1.7;">{{ item.definition }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+<style>
+  #searchBox:focus { border-color: var(--cyan); box-shadow: 0 0 20px rgba(0,243,255,0.3); }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function filterTerms() {
+  const query = document.getElementById('searchBox').value.toLowerCase();
+  document.querySelectorAll('.term-item').forEach(item => {
+    item.style.display = item.textContent.toLowerCase().includes(query) ? 'block' : 'none';
+  });
+}
+</script>
+{% endblock %}

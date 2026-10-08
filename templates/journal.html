@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Trade Journal | Forex Academy{% endblock %}
+{% block head %}
+<style>
+  .j-layout { display:grid; grid-template-columns:1fr 380px; gap:22px; }
+  @media (max-width: 1000px) { .j-layout { grid-template-columns:1fr; } }
+  .j-form-group { margin-bottom:14px; }
+  .j-form-group label { display:block; font-size:11px; color:var(--muted); letter-spacing:2px; margin-bottom:6px; text-transform:uppercase; }
+  .j-form-group input, .j-form-group select, .j-form-group textarea { width:100%; padding:10px 14px; background:#0a0c12; border:1px solid rgba(255,255,255,0.08); border-radius:6px; color:#e6ecf5; font-family:var(--font-body); font-size:14px; outline:none; }
+  .j-form-group input:focus, .j-form-group select:focus, .j-form-group textarea:focus { border-color:var(--cyan); }
+  .j-stats { display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; margin-bottom:14px; }
+  .j-stat { padding:12px; background:rgba(0,0,0,0.3); border-radius:8px; text-align:center; }
+  .j-stat-label { font-size:10px; color:var(--muted); letter-spacing:1.5px; }
+  .j-stat-value { font-family:var(--font-cyber); font-size:20px; margin-top:4px; }
+  .j-table { width:100%; border-collapse:collapse; }
+  .j-table th { padding:10px 8px; text-align:left; font-family:var(--font-cyber); font-size:10px; color:var(--cyan); letter-spacing:1.5px; border-bottom:1px solid rgba(0,255,255,0.2); }
+  .j-table td { padding:10px 8px; font-size:13px; border-bottom:1px solid rgba(255,255,255,0.05); }
+  .j-table tr:hover { background:rgba(0,212,230,0.03); }
+  .j-win { color:var(--green); font-weight:bold; }
+  .j-loss { color:var(--red); font-weight:bold; }
+  .j-del { color:var(--red); cursor:pointer; font-size:16px; }
+  .j-del:hover { text-shadow:0 0 10px var(--red); }
+</style>
+{% endblock %}
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:20px;">
+  <div>
+    <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:4px;">TRADE JOURNAL</div>
+    <h1 style="font-family:var(--font-cyber); font-size:28px; letter-spacing:4px; margin:0;">LOG EVERY TRADE</h1>
+  </div>
+  <button onclick="exportCSV()" class="btn-neon" style="padding:10px 20px; font-size:11px;">EXPORT CSV</button>
+</div>
+<div class="glass" style="padding:14px 18px; margin-bottom:20px; font-size:13px; color:#c8d0dc;">
+  💾 Your journal is stored locally in this browser. Clearing browser data will erase it. Export regularly.
+</div>
+<div class="j-layout">
+  <div>
+    <div class="glass" style="padding:20px;">
+      <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin-top:0;">TRADE HISTORY</h3>
+      <div id="journalTable"></div>
+    </div>
+  </div>
+  <div>
+    <div class="glass" style="padding:20px; margin-bottom:16px;">
+      <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin-top:0;">STATS</h3>
+      <div class="j-stats">
+        <div class="j-stat"><div class="j-stat-label">TOTAL</div><div class="j-stat-value" id="statTotal">0</div></div>
+        <div class="j-stat"><div class="j-stat-label">WIN RATE</div><div class="j-stat-value" id="statWin" style="color:var(--green);">0%</div></div>
+        <div class="j-stat"><div class="j-stat-label">WINS</div><div class="j-stat-value" id="statWins" style="color:var(--green);">0</div></div>
+        <div class="j-stat"><div class="j-stat-label">LOSSES</div><div class="j-stat-value" id="statLosses" style="color:var(--red);">0</div></div>
+        <div class="j-stat"><div class="j-stat-label">AVG R:R</div><div class="j-stat-value" id="statRR" style="color:var(--gold);">—</div></div>
+        <div class="j-stat"><div class="j-stat-label">TOTAL PIPS</div><div class="j-stat-value" id="statPips" style="color:var(--cyan);">0</div></div>
+      </div>
+    </div>
+    <div class="glass" style="padding:20px;">
+      <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin-top:0;">LOG NEW TRADE</h3>
+      <div class="j-form-group"><label>Date</label><input type="date" id="jDate"></div>
+      <div class="j-form-group"><label>Symbol</label>
+        <select id="jSymbol">
+          <option>XAUUSD</option><option>EURUSD</option><option>GBPUSD</option>
+          <option>USDJPY</option><option>AUDUSD</option><option>BTCUSD</option><option>ETHUSD</option>
+        </select>
+      </div>
+      <div class="j-form-group"><label>Direction</label>
+        <select id="jDir"><option>BUY</option><option>SELL</option></select>
+      </div>
+      <div class="j-form-group"><label>Entry</label><input type="number" step="0.00001" id="jEntry"></div>
+      <div class="j-form-group"><label>Stop Loss</label><input type="number" step="0.00001" id="jSL"></div>
+      <div class="j-form-group"><label>Take Profit</label><input type="number" step="0.00001" id="jTP"></div>
+      <div class="j-form-group"><label>Result</label>
+        <select id="jResult"><option>WIN</option><option>LOSS</option><option>BREAKEVEN</option><option>OPEN</option></select>
+      </div>
+      <div class="j-form-group"><label>Pips</label><input type="number" step="0.1" id="jPips" placeholder="e.g. 45"></div>
+      <div class="j-form-group"><label>Notes</label><textarea id="jNotes" rows="2" placeholder="What did you see?"></textarea></div>
+      <button onclick="addTrade()" class="btn-neon" style="width:100%; padding:14px;">ADD TRADE</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const STORE_KEY = 'forex_journal_trades';
+
+function getTrades() { return JSON.parse(localStorage.getItem(STORE_KEY) || '[]'); }
+function saveTrades(t) { localStorage.setItem(STORE_KEY, JSON.stringify(t)); }
+
+function addTrade() {
+  const date = document.getElementById('jDate').value;
+  const symbol = document.getElementById('jSymbol').value;
+  const dir = document.getElementById('jDir').value;
+  const entry = parseFloat(document.getElementById('jEntry').value);
+  const sl = parseFloat(document.getElementById('jSL').value);
+  const tp = parseFloat(document.getElementById('jTP').value);
+  const result = document.getElementById('jResult').value;
+  const pips = parseFloat(document.getElementById('jPips').value) || 0;
+  const notes = document.getElementById('jNotes').value;
+
+  if (!date || !entry || !sl || !tp) { alert('Fill in date, entry, SL, and TP.'); return; }
+
+  let rr = 0;
+  if (dir === 'BUY') rr = (tp - entry) / (entry - sl);
+  else rr = (entry - tp) / (sl - entry);
+  rr = Math.abs(rr);
+
+  const trades = getTrades();
+  trades.unshift({
+    id: Date.now(), date, symbol, dir, entry, sl, tp, result, pips, notes,
+    rr: parseFloat(rr.toFixed(2))
+  });
+  saveTrades(trades);
+  renderJournal();
+  ['jEntry','jSL','jTP','jPips','jNotes'].forEach(id => document.getElementById(id).value = '');
+}
+
+function deleteTrade(id) {
+  if (!confirm('Delete this trade?')) return;
+  saveTrades(getTrades().filter(t => t.id !== id));
+  renderJournal();
+}
+
+function renderJournal() {
+  const trades = getTrades();
+  const container = document.getElementById('journalTable');
+
+  if (trades.length === 0) {
+    container.innerHTML = '<div style="text-align:center; padding:40px; color:var(--muted); font-size:14px;">No trades logged yet. Start with the form →</div>';
+  } else {
+    let html = '<table class="j-table"><thead><tr><th>DATE</th><th>SYMBOL</th><th>DIR</th><th>ENTRY</th><th>R:R</th><th>PIPS</th><th>RESULT</th><th></th></tr></thead><tbody>';
+    trades.forEach(t => {
+      const cls = t.result === 'WIN' ? 'j-win' : t.result === 'LOSS' ? 'j-loss' : '';
+      html += `<tr>
+        <td>${t.date}</td>
+        <td>${t.symbol}</td>
+        <td>${t.dir}</td>
+        <td>${t.entry}</td>
+        <td>1:${t.rr}</td>
+        <td>${t.pips}</td>
+        <td class="${cls}">${t.result}</td>
+        <td><span class="j-del" onclick="deleteTrade(${t.id})">×</span></td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  }
+
+  const wins = trades.filter(t => t.result === 'WIN').length;
+  const losses = trades.filter(t => t.result === 'LOSS').length;
+  const closed = wins + losses;
+  const winRate = closed > 0 ? (wins / closed * 100).toFixed(1) : 0;
+  const avgRR = trades.length > 0 ? (trades.reduce((s, t) => s + t.rr, 0) / trades.length).toFixed(2) : '—';
+  const totalPips = trades.reduce((s, t) => s + (t.pips || 0), 0);
+
+  document.getElementById('statTotal').textContent = trades.length;
+  document.getElementById('statWin').textContent = winRate + '%';
+  document.getElementById('statWins').textContent = wins;
+  document.getElementById('statLosses').textContent = losses;
+  document.getElementById('statRR').textContent = avgRR === '—' ? '—' : '1:' + avgRR;
+  document.getElementById('statPips').textContent = totalPips.toFixed(1);
+}
+
+function exportCSV() {
+  const trades = getTrades();
+  if (trades.length === 0) { alert('No trades to export'); return; }
+  const headers = ['Date','Symbol','Direction','Entry','SL','TP','R:R','Pips','Result','Notes'];
+  const rows = trades.map(t => [t.date, t.symbol, t.dir, t.entry, t.sl, t.tp, t.rr, t.pips, t.result, `"${(t.notes||'').replace(/"/g,'""')}"`]);
+  const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'forex_journal_' + new Date().toISOString().split('T')[0] + '.csv';
+  a.click();
+}
+
+document.getElementById('jDate').value = new Date().toISOString().split('T')[0];
+renderJournal();
+</script>
+{% endblock %}

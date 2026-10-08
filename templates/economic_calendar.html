@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+{% block title %}Economic Calendar | Forex Academy{% endblock %}
+{% block head %}
+<style>
+  .cal-event {
+    display: grid;
+    grid-template-columns: 90px 80px 1fr 100px;
+    gap: 12px;
+    align-items: center;
+    padding: 14px 16px;
+    background: rgba(0,0,0,0.3);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    border-left: 3px solid;
+    transition: .25s;
+  }
+  .cal-event:hover { background: rgba(0,212,230,0.05); }
+  .cal-event.high { border-color: var(--red); }
+  .cal-event.medium { border-color: var(--gold); }
+  .cal-event.low { border-color: var(--cyan); }
+  .cal-date { font-family: var(--font-cyber); font-size: 13px; color: #fff; letter-spacing: 1px; }
+  .cal-day { font-size: 11px; color: var(--muted); letter-spacing: 1px; }
+  .cal-time { font-family: var(--font-cyber); font-size: 13px; color: var(--cyan); }
+  .cal-time .local { display: block; font-size: 10px; color: var(--muted); margin-top: 2px; letter-spacing: 1px; }
+  .cal-name { font-size: 14px; color: #e6ecf5; font-weight: 500; }
+  .cal-name .sub { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; letter-spacing: 1px; }
+  .cal-flag { font-size: 11px; color: var(--muted); text-align: right; letter-spacing: 1px; }
+  .cal-impact { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-family: var(--font-cyber); letter-spacing: 1px; font-weight: 700; }
+  .cal-impact.high { background: rgba(220,38,38,0.2); color: var(--red); }
+  .cal-impact.medium { background: rgba(230,184,0,0.2); color: var(--gold); }
+  .cal-impact.low { background: rgba(0,212,230,0.15); color: var(--cyan); }
+  @media (max-width: 700px) {
+    .cal-event { grid-template-columns: 1fr; gap: 6px; }
+    .cal-flag { text-align: left; }
+  }
+</style>
+{% endblock %}
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:20px; flex-wrap:wrap; gap:16px;">
+  <div>
+    <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:4px;">NEWS AWARENESS</div>
+    <h1 style="font-family:var(--font-cyber); font-size:28px; letter-spacing:4px; margin:0;">ECONOMIC CALENDAR</h1>
+  </div>
+  <a href="https://www.forexfactory.com/calendar" target="_blank" class="btn-neon" style="padding:12px 20px; font-size:11px;">
+    📅 OPEN FULL CALENDAR →
+  </a>
+</div>
+
+<div class="glass" style="padding:14px 18px; margin-bottom:20px; font-size:13px; color:#c8d0dc;">
+  ⚠️ <b>Rule:</b> Do NOT take trades 30 minutes before or after a <span style="color:var(--red); font-weight:700;">RED</span> event. News spikes kill accounts faster than bad entries.
+</div>
+
+<div class="glass" style="padding:20px; margin-bottom:20px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:10px;">
+    <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin:0;">📅 NEXT 30 DAYS — HIGH IMPACT EVENTS</h3>
+    <div style="font-size:11px; color:var(--muted); letter-spacing:2px;">Times shown in EST + your local time</div>
+  </div>
+  <div id="upcomingEvents"></div>
+</div>
+
+<div class="glass" style="padding:20px; margin-bottom:20px;">
+  <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--gold); margin-top:0;">📌 RECURRING HIGH-IMPACT EVENTS</h3>
+  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px;">
+    <div style="padding:14px; background:rgba(220,38,38,0.08); border-left:3px solid var(--red); border-radius:6px;">
+      <b style="color:var(--red); font-size:14px;">NFP (Non-Farm Payrolls)</b>
+      <div style="font-size:12px; color:var(--muted); margin-top:4px;">1st Friday of every month — 8:30 AM EST</div>
+      <div style="font-size:11px; color:var(--muted); margin-top:2px;">Highest volatility event for XAUUSD</div>
+    </div>
+    <div style="padding:14px; background:rgba(220,38,38,0.08); border-left:3px solid var(--red); border-radius:6px;">
+      <b style="color:var(--red); font-size:14px;">FOMC Interest Rate Decision</b>
+      <div style="font-size:12px; color:var(--muted); margin-top:4px;">8 times per year — 2:00 PM EST</div>
+      <div style="font-size:11px; color:var(--muted); margin-top:2px;">Followed by a press conference at 2:30 PM</div>
+    </div>
+    <div style="padding:14px; background:rgba(220,38,38,0.08); border-left:3px solid var(--red); border-radius:6px;">
+      <b style="color:var(--red); font-size:14px;">CPI (Inflation)</b>
+      <div style="font-size:12px; color:var(--muted); margin-top:4px;">Monthly, typically mid-month — 8:30 AM EST</div>
+      <div style="font-size:11px; color:var(--muted); margin-top:2px;">Big swings on XAUUSD and DXY</div>
+    </div>
+    <div style="padding:14px; background:rgba(220,38,38,0.08); border-left:3px solid var(--red); border-radius:6px;">
+      <b style="color:var(--red); font-size:14px;">Fed Speakers</b>
+      <div style="font-size:12px; color:var(--muted); margin-top:4px;">Various times — check live calendar</div>
+      <div style="font-size:11px; color:var(--muted); margin-top:2px;">Surprise hawkish/dovish remarks move markets</div>
+    </div>
+    <div style="padding:14px; background:rgba(230,184,0,0.08); border-left:3px solid var(--gold); border-radius:6px;">
+      <b style="color:var(--gold); font-size:14px;">GDP (Gross Domestic Product)</b>
+      <div style="font-size:12px; color:var(--muted); margin-top:4px;">Quarterly — 8:30 AM EST</div>
+      <div style="font-size:11px; color:var(--muted); margin-top:2px;">Released last Thursday of Jan/Apr/Jul/Oct</div>
+    </div>
+    <div style="padding:14px; background:rgba(230,184,0,0.08); border-left:3px solid var(--gold); border-radius:6px;">
+      <b style="color:var(--gold); font-size:14px;">Unemployment Claims</b>
+      <div style="font-size:12px; color:var(--muted); margin-top:4px;">Every Thursday — 8:30 AM EST</div>
+      <div style="font-size:11px; color:var(--muted); margin-top:2px;">Medium impact — good for scalping setups</div>
+    </div>
+  </div>
+</div>
+
+<div class="glass" style="padding:20px;">
+  <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--violet); margin-top:0;">🏦 FOMC 2026 MEETING DATES</h3>
+  <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">Decision released at 2:00 PM EST on the last day of each meeting.</p>
+  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:10px; font-size:13px;">
+    <div style="padding:10px; background:rgba(122,78,224,0.08); border-radius:6px;">Jan 27-28, 2026</div>
+    <div style="padding:10px; background:rgba(122,78,224,0.08); border-radius:6px;">Mar 17-18, 2026</div>
+    <div style="padding:10px; background:rgba(122,78,224,0.08); border-radius:6px;">Apr 28-29, 2026</div>
+    <div style="padding:10px; background:rgba(122,78,224,0.08); border-radius:6px;">Jun 16-17, 2026</div>
+    <div style="padding:10px; background:rgba(122,78,224,0.08); border-radius:6px;">Jul 28-29, 2026</div>
+    <div style="padding:10px; background:rgba(122,78,224,0.08); border-radius:6px;">Sep 15-16, 2026</div>
+    <div style="padding:10px; background:rgba(122,78,224,0.08); border-radius:6px;">Nov 3-4, 2026</div>
+    <div style="padding:10px; background:rgba(122,78,224,0.08); border-radius:6px;">Dec 15-16, 2026</div>
+  </div>
+</div>
+
+<div class="glass" style="padding:16px; margin-top:16px; font-size:13px; color:var(--muted); text-align:center;">
+  💡 This page shows events computed live from your browser's date. No external service required — always works.<br>
+  For the full live feed with exact times, click <b style="color:var(--cyan);">OPEN FULL CALENDAR</b> above.
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function firstFridayOfMonth(year, month) {
+  const d = new Date(year, month, 1);
+  while (d.getDay() !== 5) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+function estToLocalDisplay(estHour, estMinute) {
+  const now = new Date();
+  const month = now.getMonth();
+  const offsetHours = (month >= 2 && month <= 10) ? 4 : 5;
+  const utcHour = estHour + offsetHours;
+  const localDate = new Date();
+  localDate.setUTCHours(utcHour, estMinute, 0, 0);
+  return localDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
+}
+
+function formatDate(d) { return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }
+function formatWeekday(d) { return d.toLocaleDateString('en-US', { weekday: 'long' }); }
+
+function getUpcomingEvents() {
+  const events = [];
+  const now = new Date();
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() + 30);
+
+  // NFP — first Friday of next 3 months
+  for (let m = 0; m < 3; m++) {
+    const monthDate = new Date(now.getFullYear(), now.getMonth() + m, 1);
+    const nfp = firstFridayOfMonth(monthDate.getFullYear(), monthDate.getMonth());
+    if (nfp >= now && nfp <= cutoff) {
+      events.push({
+        date: nfp, name: 'Non-Farm Payrolls (NFP)', sub: 'US Employment Data',
+        timeEst: '8:30 AM EST', estHour: 8, estMin: 30, impact: 'high', flag: '🇺🇸 USD'
+      });
+    }
+  }
+
+  // CPI — ~13th of each month
+  for (let m = 0; m < 3; m++) {
+    const monthDate = new Date(now.getFullYear(), now.getMonth() + m, 13);
+    if (monthDate >= now && monthDate <= cutoff) {
+      events.push({
+        date: monthDate, name: 'Consumer Price Index (CPI)', sub: 'US Inflation Data',
+        timeEst: '8:30 AM EST', estHour: 8, estMin: 30, impact: 'high', flag: '🇺🇸 USD'
+      });
+    }
+  }
+
+  // FOMC 2026
+  const fomcDates = [
+    new Date(2026, 0, 28), new Date(2026, 2, 18), new Date(2026, 3, 29),
+    new Date(2026, 5, 17), new Date(2026, 6, 29), new Date(2026, 8, 16),
+    new Date(2026, 10, 4), new Date(2026, 11, 16)
+  ];
+  fomcDates.forEach(d => {
+    if (d >= now && d <= cutoff) {
+      events.push({
+        date: d, name: 'FOMC Meeting', sub: 'Interest Rate Decision + Press Conference',
+        timeEst: '2:00 PM EST', estHour: 14, estMin: 0, impact: 'high', flag: '🇺🇸 USD'
+      });
+    }
+  });
+
+  // Unemployment Claims — next 5 Thursdays
+  for (let w = 0; w < 5; w++) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    const daysUntil = (4 - d.getDay() + 7) % 7 || 7;
+    d.setDate(d.getDate() + daysUntil + w * 7);
+    if (d >= now && d <= cutoff) {
+      events.push({
+        date: d, name: 'Unemployment Claims', sub: 'Weekly US Jobless Data',
+        timeEst: '8:30 AM EST', estHour: 8, estMin: 30, impact: 'medium', flag: '🇺🇸 USD'
+      });
+    }
+  }
+
+  // ECB
+  const ecbDates = [
+    new Date(2026, 0, 30), new Date(2026, 2, 12), new Date(2026, 3, 30),
+    new Date(2026, 5, 11), new Date(2026, 6, 23), new Date(2026, 8, 10),
+    new Date(2026, 9, 29), new Date(2026, 11, 17)
+  ];
+  ecbDates.forEach(d => {
+    if (d >= now && d <= cutoff) {
+      events.push({
+        date: d, name: 'ECB Rate Decision', sub: 'European Central Bank',
+        timeEst: '8:15 AM EST', estHour: 8, estMin: 15, impact: 'high', flag: '🇪🇺 EUR'
+      });
+    }
+  });
+
+  events.sort((a, b) => a.date - b.date);
+  return events;
+}
+
+function renderUpcoming() {
+  const events = getUpcomingEvents();
+  const container = document.getElementById('upcomingEvents');
+
+  if (events.length === 0) {
+    container.innerHTML = '<div style="text-align:center; padding:30px; color:var(--muted);">No major events in the next 30 days.</div>';
+    return;
+  }
+
+  container.innerHTML = events.map(e => `
+    <div class="cal-event ${e.impact}">
+      <div>
+        <div class="cal-date">${formatDate(e.date)}</div>
+        <div class="cal-day">${formatWeekday(e.date)}</div>
+      </div>
+      <div class="cal-time">
+        ${e.timeEst}
+        <span class="local">${estToLocalDisplay(e.estHour, e.estMin)} your time</span>
+      </div>
+      <div class="cal-name">
+        ${e.name}
+        <span class="sub">${e.sub}</span>
+      </div>
+      <div class="cal-flag">
+        <span class="cal-impact ${e.impact}">${e.impact.toUpperCase()}</span>
+        <div style="margin-top:6px;">${e.flag}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+renderUpcoming();
+</script>
+{% endblock %}

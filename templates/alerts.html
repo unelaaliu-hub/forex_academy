@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Price Alerts | Forex Academy{% endblock %}
+{% block head %}
+<style>
+  .al-row { display:flex; justify-content:space-between; align-items:center; padding:14px 0; border-bottom:1px solid rgba(255,255,255,0.05); }
+  .al-row:last-child { border-bottom:none; }
+  .al-toggle { width:52px; height:28px; background:#0a0c12; border:1px solid rgba(255,255,255,0.15); border-radius:14px; position:relative; cursor:pointer; transition:.25s; }
+  .al-toggle::after { content:''; position:absolute; top:2px; left:2px; width:22px; height:22px; background:var(--muted); border-radius:50%; transition:.25s; }
+  .al-toggle.on { background:rgba(34,197,94,0.2); border-color:var(--green); }
+  .al-toggle.on::after { left:26px; background:var(--green); }
+</style>
+{% endblock %}
+{% block content %}
+<div style="margin-bottom:20px;">
+  <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:4px;">ALERTS</div>
+  <h1 style="font-family:var(--font-cyber); font-size:28px; letter-spacing:4px; margin:0;">NOTIFICATIONS</h1>
+</div>
+
+<div class="glass" style="padding:24px; margin-bottom:20px;">
+  <div class="al-row">
+    <div>
+      <div style="font-size:15px; color:#e6ecf5; font-weight:600;">Browser Notifications</div>
+      <div style="font-size:12px; color:var(--muted); margin-top:2px;">Desktop notification when a HIGH confidence setup appears.</div>
+    </div>
+    <div class="al-toggle" id="tglBrowser" onclick="toggleBrowser()"></div>
+  </div>
+  <div class="al-row">
+    <div>
+      <div style="font-size:15px; color:#e6ecf5; font-weight:600;">Sound Alerts</div>
+      <div style="font-size:12px; color:var(--muted); margin-top:2px;">Play a chime when a HIGH confidence setup appears.</div>
+    </div>
+    <div class="al-toggle" id="tglSound" onclick="toggleSound()"></div>
+  </div>
+</div>
+
+<div class="glass" style="padding:24px;">
+  <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin-top:0;">WATCHED PAIRS</h3>
+  <div id="watchList" style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:16px;"></div>
+  <div style="font-size:13px; color:var(--muted); line-height:1.6;">
+    <b style="color:#e6ecf5;">How it works:</b> Alerts run in the background of any open tab. Every 60 seconds, watched pairs are checked. When a HIGH confidence setup appears, you get a notification. Alerts persist as long as this browser tab is open — no server needed.
+  </div>
+</div>
+
+<div class="glass" style="padding:24px; margin-top:20px;">
+  <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin-top:0;">TEST ALERT</h3>
+  <button onclick="testAlert()" class="btn-neon" style="padding:12px 24px; margin-bottom:12px;">SEND TEST NOTIFICATION</button>
+  <button onclick="runNow()" class="btn-neon" style="padding:12px 24px; margin-left:8px;">CHECK NOW</button>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const KEY_BROWSER = 'forex_alerts_browser';
+const KEY_SOUND = 'forex_alerts_sound';
+const KEY_WATCHED = 'forex_watched_pairs';
+const ALL_PAIRS = ['XAUUSD','EURUSD','GBPUSD','USDJPY','AUDUSD','BTCUSD','ETHUSD'];
+
+function getWatched() {
+  try {
+    const stored = localStorage.getItem(KEY_WATCHED);
+    if (stored) return JSON.parse(stored);
+  } catch(e) {}
+  return ALL_PAIRS.slice();
+}
+
+function setWatched(arr) {
+  localStorage.setItem(KEY_WATCHED, JSON.stringify(arr));
+}
+
+function renderWatched() {
+  const watched = getWatched();
+  const container = document.getElementById('watchList');
+  container.innerHTML = ALL_PAIRS.map(p => `
+    <label style="display:flex; align-items:center; gap:8px; padding:8px 14px; background:#0a0c12; border:1px solid rgba(255,255,255,0.08); border-radius:6px; cursor:pointer; font-family:var(--font-cyber); font-size:12px; letter-spacing:1.5px;">
+      <input type="checkbox" value="${p}" ${watched.includes(p) ? 'checked' : ''} style="accent-color:var(--cyan);" onchange="updateWatched('${p}', this.checked)">
+      ${p}
+    </label>
+  `).join('');
+}
+
+function updateWatched(pair, on) {
+  const watched = getWatched();
+  if (on && !watched.includes(pair)) watched.push(pair);
+  if (!on) {
+    const i = watched.indexOf(pair);
+    if (i >= 0) watched.splice(i, 1);
+  }
+  setWatched(watched);
+}
+
+function updateToggles() {
+  document.getElementById('tglBrowser').classList.toggle('on', localStorage.getItem(KEY_BROWSER) === '1');
+  document.getElementById('tglSound').classList.toggle('on', localStorage.getItem(KEY_SOUND) === '1');
+}
+
+function toggleBrowser() {
+  const on = localStorage.getItem(KEY_BROWSER) === '1';
+  if (!on && 'Notification' in window) {
+    Notification.requestPermission().then(p => {
+      if (p === 'granted') {
+        localStorage.setItem(KEY_BROWSER, '1');
+        updateToggles();
+      } else {
+        alert('Please allow notifications in your browser settings.');
+      }
+    });
+  } else {
+    localStorage.setItem(KEY_BROWSER, '0');
+    updateToggles();
+  }
+}
+
+function toggleSound() {
+  const on = localStorage.getItem(KEY_SOUND) === '1';
+  localStorage.setItem(KEY_SOUND, on ? '0' : '1');
+  updateToggles();
+}
+
+function testAlert() {
+  if (localStorage.getItem(KEY_BROWSER) === '1' && Notification.permission === 'granted') {
+    new Notification('Forex Academy Alert', {
+      body: 'This is a test. Real alerts fire when a HIGH confidence setup appears.'
+    });
+  } else {
+    alert('Enable browser notifications first.');
+  }
+}
+
+function runNow() {
+  if (window.forexAlerts && window.forexAlerts.checkAllPairs) {
+    window.forexAlerts.checkAllPairs();
+    alert('Running check across watched pairs. Watch for the green banner.');
+  }
+}
+
+renderWatched();
+updateToggles();
+</script>
+{% endblock %}

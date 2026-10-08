@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block title %}Prop Firm Tracker | Forex Academy{% endblock %}
+{% block head %}
+<style>
+  .pf-form-group { margin-bottom:14px; }
+  .pf-form-group label { display:block; font-size:11px; color:var(--muted); letter-spacing:2px; margin-bottom:6px; text-transform:uppercase; }
+  .pf-form-group input, .pf-form-group select { width:100%; padding:10px 14px; background:#0a0c12; border:1px solid rgba(255,255,255,0.08); border-radius:6px; color:#e6ecf5; font-family:var(--font-body); font-size:14px; outline:none; }
+  .pf-bar { height:14px; background:rgba(0,0,0,0.4); border-radius:7px; overflow:hidden; margin-top:8px; }
+  .pf-bar-fill { height:100%; transition:width .3s; }
+  .pf-stat { padding:16px; background:rgba(0,0,0,0.3); border-radius:10px; text-align:center; border:1px solid rgba(255,255,255,0.06); }
+  .pf-stat-label { font-size:10px; color:var(--muted); letter-spacing:1.5px; }
+  .pf-stat-value { font-family:var(--font-cyber); font-size:22px; margin-top:6px; }
+  .pf-warning { padding:12px; border-radius:8px; margin-top:12px; font-size:13px; display:none; }
+  .pf-warning.show { display:block; }
+  .pf-danger { background:rgba(220,38,38,0.15); border:1px solid var(--red); color:#fca5a5; }
+  .pf-ok { background:rgba(34,197,94,0.1); border:1px solid var(--green); color:#86efac; }
+</style>
+{% endblock %}
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:20px; flex-wrap:wrap; gap:16px;">
+  <div>
+    <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:4px;">PROP FIRM CHALLENGE</div>
+    <h1 style="font-family:var(--font-cyber); font-size:28px; letter-spacing:4px; margin:0;">CHALLENGE TRACKER</h1>
+  </div>
+  <button onclick="resetTracker()" class="btn-neon" style="padding:10px 20px; font-size:11px;">RESET</button>
+</div>
+<div class="glass" style="padding:14px 18px; margin-bottom:20px; font-size:13px; color:#c8d0dc;">
+  Track your funded account rules. Break any rule → account gone. This keeps it in front of you.
+</div>
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:22px;" id="pfLayout">
+  <div class="glass" style="padding:24px;">
+    <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin-top:0;">YOUR RULES</h3>
+    <div class="pf-form-group"><label>Starting Balance ($)</label><input type="number" id="pfStart" value="10000" oninput="saveAndRender()"></div>
+    <div class="pf-form-group"><label>Profit Target (%)</label><input type="number" id="pfTarget" value="8" step="0.1" oninput="saveAndRender()"></div>
+    <div class="pf-form-group"><label>Max Total Drawdown (%)</label><input type="number" id="pfMaxDD" value="10" step="0.1" oninput="saveAndRender()"></div>
+    <div class="pf-form-group"><label>Max Daily Loss (%)</label><input type="number" id="pfDailyDD" value="5" step="0.1" oninput="saveAndRender()"></div>
+    <div class="pf-form-group"><label>Current Balance ($)</label><input type="number" id="pfCurrent" value="10000" oninput="saveAndRender()"></div>
+    <div class="pf-form-group"><label>Today's Balance at Open ($)</label><input type="number" id="pfTodayOpen" value="10000" oninput="saveAndRender()"></div>
+  </div>
+  <div>
+    <div class="glass" style="padding:20px;">
+      <h3 style="font-family:var(--font-cyber); font-size:13px; letter-spacing:2px; color:var(--cyan); margin-top:0;">PROGRESS</h3>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
+        <div class="pf-stat"><div class="pf-stat-label">PROFIT TARGET</div><div class="pf-stat-value" id="pfTargetVal">—</div></div>
+        <div class="pf-stat"><div class="pf-stat-label">CURRENT PROFIT</div><div class="pf-stat-value" id="pfCurrentVal">—</div></div>
+        <div class="pf-stat"><div class="pf-stat-label">TOTAL DD USED</div><div class="pf-stat-value" id="pfTotalDD">—</div></div>
+        <div class="pf-stat"><div class="pf-stat-label">DAILY DD USED</div><div class="pf-stat-value" id="pfDailyDD">—</div></div>
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <div style="font-size:11px; color:var(--muted); letter-spacing:1.5px; display:flex; justify-content:space-between;"><span>TARGET PROGRESS</span><span id="pfProgressPct">0%</span></div>
+        <div class="pf-bar"><div class="pf-bar-fill" id="pfProgressFill" style="background:var(--green); width:0%;"></div></div>
+      </div>
+      <div style="margin-bottom:14px;">
+        <div style="font-size:11px; color:var(--muted); letter-spacing:1.5px; display:flex; justify-content:space-between;"><span>MAX DRAWDOWN USED</span><span id="pfDDTotalPct">0%</span></div>
+        <div class="pf-bar"><div class="pf-bar-fill" id="pfDDFill" style="background:var(--red); width:0%;"></div></div>
+      </div>
+      <div style="margin-bottom:14px;">
+        <div style="font-size:11px; color:var(--muted); letter-spacing:1.5px; display:flex; justify-content:space-between;"><span>DAILY LOSS USED</span><span id="pfDailyPct">0%</span></div>
+        <div class="pf-bar"><div class="pf-bar-fill" id="pfDailyFill" style="background:var(--gold); width:0%;"></div></div>
+      </div>
+
+      <div id="pfWarning" class="pf-warning"></div>
+    </div>
+  </div>
+</div>
+<style>@media (max-width: 900px) { #pfLayout { grid-template-columns: 1fr !important; } }</style>
+{% endblock %}
+{% block scripts %}
+<script>
+const KEY = 'forex_prop_firm';
+const FIELDS = ['pfStart','pfTarget','pfMaxDD','pfDailyDD','pfCurrent','pfTodayOpen'];
+
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem(KEY) || '{}');
+    FIELDS.forEach(f => { if (s[f] !== undefined) document.getElementById(f).value = s[f]; });
+  } catch(e) {}
+}
+
+function saveAndRender() {
+  const data = {};
+  FIELDS.forEach(f => data[f] = document.getElementById(f).value);
+  localStorage.setItem(KEY, JSON.stringify(data));
+  render();
+}
+
+function resetTracker() {
+  if (!confirm('Reset tracker to defaults?')) return;
+  localStorage.removeItem(KEY);
+  location.reload();
+}
+
+function render() {
+  const start = parseFloat(document.getElementById('pfStart').value) || 0;
+  const target = parseFloat(document.getElementById('pfTarget').value) || 0;
+  const maxDD = parseFloat(document.getElementById('pfMaxDD').value) || 0;
+  const dailyDD = parseFloat(document.getElementById('pfDailyDD').value) || 0;
+  const current = parseFloat(document.getElementById('pfCurrent').value) || 0;
+  const todayOpen = parseFloat(document.getElementById('pfTodayOpen').value) || 0;
+
+  const targetAmt = start * (1 + target / 100);
+  const profit = current - start;
+  const profitPct = (profit / start) * 100;
+  const progressPct = Math.min((profitPct / target) * 100, 100);
+  progressPct >= 0 ? progressPct : 0;
+
+  const ddUsed = start - current;
+  const ddPct = Math.max(0, (ddUsed / start) * 100);
+  const dailyUsed = todayOpen - current;
+  const dailyPct = Math.max(0, (dailyUsed / todayOpen) * 100);
+
+  document.getElementById('pfTargetVal').textContent = '$' + targetAmt.toFixed(0);
+  document.getElementById('pfCurrentVal').textContent = (profit >= 0 ? '+' : '') + '$' + profit.toFixed(0);
+  document.getElementById('pfCurrentVal').style.color = profit >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('pfTotalDD').textContent = ddPct.toFixed(2) + '%';
+  document.getElementById('pfTotalDD').style.color = ddPct > maxDD * 0.7 ? 'var(--red)' : 'var(--gold)';
+  document.getElementById('pfDailyDD').textContent = dailyPct.toFixed(2) + '%';
+  document.getElementById('pfDailyDD').style.color = dailyPct > dailyDD * 0.7 ? 'var(--red)' : 'var(--gold)';
+
+  document.getElementById('pfProgressPct').textContent = Math.max(0, profitPct).toFixed(1) + '% of ' + target + '%';
+  document.getElementById('pfProgressFill').style.width = Math.max(0, progressPct) + '%';
+
+  document.getElementById('pfDDTotalPct').textContent = ddPct.toFixed(1) + '% of ' + maxDD + '%';
+  document.getElementById('pfDDFill').style.width = Math.min((ddPct / maxDD) * 100, 100) + '%';
+
+  document.getElementById('pfDailyPct').textContent = dailyPct.toFixed(1) + '% of ' + dailyDD + '%';
+  document.getElementById('pfDailyFill').style.width = Math.min((dailyPct / dailyDD) * 100, 100) + '%';
+
+  const warn = document.getElementById('pfWarning');
+  if (ddPct >= maxDD) {
+    warn.className = 'pf-warning pf-danger show';
+    warn.innerHTML = '🚨 <b>MAX DRAWDOWN BREACHED</b> — Account would be terminated.';
+  } else if (dailyPct >= dailyDD) {
+    warn.className = 'pf-warning pf-danger show';
+    warn.innerHTML = '🚨 <b>DAILY LOSS LIMIT BREACHED</b> — Stop trading immediately.';
+  } else if (ddPct > maxDD * 0.7) {
+    warn.className = 'pf-warning pf-danger show';
+    warn.innerHTML = '⚠️ <b>CAUTION</b> — You have used ' + ddPct.toFixed(1) + '% of your max DD. Reduce size.';
+  } else {
+    warn.className = 'pf-warning pf-ok show';
+    warn.innerHTML = '✅ <b>All good</b> — Keep following your rules.';
+  }
+}
+
+load();
+render();
+</script>
+{% endblock %}
