@@ -1,6 +1,6 @@
 """
 Synthetic Indices Engine — Deriv WebSocket API (websocket-client, sync)
-Python 3.14 safe — no asyncio.Lock usage.
+Drop Origin header + suppress_origin=True to bypass Cloudflare 520.
 """
 import json
 import time
@@ -90,16 +90,17 @@ def _build_ssl_context():
 
 
 def _try_one_endpoint(url, req, ssl_context):
-    """Synchronous connection using websocket-client."""
+    """Synchronous connection using websocket-client.
+    No Origin header + suppress_origin=True to bypass Cloudflare 520.
+    """
     headers = [
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Origin: https://app.deriv.com",
     ]
 
     kwargs = {
         "timeout": 15,
         "header": headers,
-        "suppress_origin": False,
+        "suppress_origin": True,
     }
     if ssl_context is not None:
         kwargs["sslopt"] = {"context": ssl_context}
