@@ -129,6 +129,7 @@ def backtest_page():
             return jsonify({"error": str(e)})
     return render_template('backtest.html')
 
+
 @app.route('/api/backtest')
 def api_backtest():
     symbol = request.args.get('symbol', 'XAUUSD').upper()
@@ -155,7 +156,7 @@ def game():
     return render_template('game.html')
 
 
-# ---------- BATCH 1: ARMOR ----------
+# ---------- ARMOR ----------
 @app.route('/risk-of-ruin')
 def risk_of_ruin():
     return render_template('risk_of_ruin.html')
@@ -182,9 +183,6 @@ def prop_firm():
     return render_template('prop_firm.html')
 
 
-# ... (existing imports)
-
 if __name__ == '__main__':
-    # Use the PORT environment variable Render provides, or 5006 locally
     port = int(os.environ.get('PORT', 5006))
     app.run(host='0.0.0.0', port=port, debug=False)
