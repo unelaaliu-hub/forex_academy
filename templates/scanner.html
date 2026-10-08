@@ -111,7 +111,7 @@
   .setup-prices .lbl { color:var(--muted); font-family:var(--font-cyber); font-size:10px; letter-spacing:1px; }
   .checklist { display:flex; flex-direction:column; gap:5px; }
   .checklist-row { display:flex; align-items:flex-start; gap:8px; font-size:12px; line-height:1.4; }
-  .checklist-row .ic { flex-shrink:0; font-size:12px; margin-top:1px; }
+  .checklist-row .ic { flex-shrink:0; }
   .checklist-row .lbl { color:#c8d0dc; flex:1; }
   .checklist-row .detail { color:var(--muted); font-size:11px; }
   .checklist-row.pass .lbl { color:#e6ecf5; font-weight:600; }
@@ -120,7 +120,6 @@
 
   .waiting-list { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
   .waiting-row { font-size:12px; color:#c8d0dc; line-height:1.5; padding-left:2px; }
-  .waiting-row .lbl { color:var(--muted); font-family:var(--font-cyber); font-size:10px; letter-spacing:1px; display:block; margin-bottom:2px; }
 </style>
 {% endblock %}
 
@@ -324,6 +323,7 @@ let rangeRedrawPending = false;
 
 const show = { OB: true, FVG: true, POOL: true, PDHL: true, SESSION: true, SETUP: false, SWING: true };
 const MAX_SWINGS_PER_SIDE = 5;
+let lastZoneSig = null;
 
 function isOandaSource(src) {
   if (!src) return false;
@@ -815,7 +815,6 @@ function buildWaitingFor(data) {
 
   const lastClose = (data.candles && data.candles.length) ? data.candles[data.candles.length - 1].close : 0;
 
-  // ATR approximation from visible candles
   let atr = 0;
   const c = data.candles || [];
   if (c.length >= 15) {
@@ -826,7 +825,6 @@ function buildWaitingFor(data) {
 
   const bullets = [];
 
-  // MSS trigger
   const mss = data.mss;
   const mssDir = mss ? (mss.type === 'MSS_BULL' ? 'BUY' : 'SELL') : null;
   if (!mss) {
@@ -845,7 +843,6 @@ function buildWaitingFor(data) {
     bullets.push(`MSS already fired: ${mssDir} ${mss.type === 'MSS_BULL' ? '🟢' : '🔴'}`);
   }
 
-  // Nearest fresh zone in trade direction
   const wantBull = (dir === 'BUY' || dir === 'BOTH');
   const wantBear = (dir === 'SELL' || dir === 'BOTH');
   let nearest = null, nearestDist = Infinity;
@@ -872,7 +869,6 @@ function buildWaitingFor(data) {
     bullets.push('A fresh zone in the trade direction');
   }
 
-  // Sweep status
   const sweep = data.sweep;
   const sweepOk = sweep && (
     (sweep.type === 'SSL_SWEEP' && dir === 'BUY') ||
@@ -888,7 +884,6 @@ function buildWaitingFor(data) {
     bullets.push('Sweep on either side to confirm direction');
   }
 
-  // Title
   let title = 'STANDING BY';
   if (dir === 'BUY') title = 'WAITING FOR BUY';
   else if (dir === 'SELL') title = 'WAITING FOR SELL';
@@ -914,7 +909,6 @@ function updateSetupPanel(data) {
   });
 
   if (!pick) {
-    // No setup → show what we're waiting for
     const w = buildWaitingFor(data);
     panel.className = 'setup-panel none';
     dirEl.textContent = w.title;
@@ -930,7 +924,6 @@ function updateSetupPanel(data) {
     return;
   }
 
-  // Real setup exists — show it (unchanged from before)
   const isBuy = pick.direction === 'BUY';
   panel.className = 'setup-panel ' + (isBuy ? 'buy' : 'sell');
   dirEl.textContent = (isBuy ? '▲ BUY' : '▼ SELL') + ' · ' + pick.confidence;
@@ -993,7 +986,19 @@ document.addEventListener('click', (e) => {
   if (!popup.contains(e.target) && !e.target.classList.contains('clickable')) popup.classList.remove('show');
 });
 
-function renderData(data) {
+function zoneSignature(data) {
+  try {
+    const obs = (data.obs || []).map(z => `${z.type}:${z.top.toFixed(2)}:${z.bottom.toFixed(2)}`).join('|');
+    const pools = (data.pools || []).map(p => `${p.type}:${p.price.toFixed(2)}`).join('|');
+    const sH = (data.swing_high_markers || []).length;
+    const sL = (data.swing_low_markers || []).length;
+    return obs + '##' + pools + '##' + sH + '_' + sL;
+  } catch (e) {
+    return 'sig_' + Date.now();
+  }
+}
+
+function renderData(data, isRefresh) {
   if (!data || data.error) return;
   currentData = data;
 
@@ -1009,7 +1014,19 @@ function renderData(data) {
     if (!seen.has(key)) { seen.add(key); unique.push(c); }
   });
 
-  series.setData(unique);
+  if (!isRefresh) {
+    // Initial page load — full replace
+    series.setData(unique);
+  } else if (unique.length > 0) {
+    // Refresh — only update the last candle (seamless, no flicker)
+    const last = unique[unique.length - 1];
+    try {
+      series.update(last);
+    } catch (e) {
+      series.setData(unique);
+    }
+  }
+
   updateMSSPanel(data.mss);
   updateBiasPanel(data.bias);
   updateSetupPanel(data);
@@ -1036,7 +1053,13 @@ function renderData(data) {
   if (tb) { tb.textContent = data.structure.trend; tb.className = 'badge badge-' + data.structure.trend; }
 
   checkAlert(data);
-  setTimeout(() => drawZones(data), 200);
+
+  // Only redraw zones if the zone data actually changed
+  const newSig = zoneSignature(data);
+  if (!isRefresh || newSig !== lastZoneSig) {
+    lastZoneSig = newSig;
+    setTimeout(() => drawZones(data), isRefresh ? 60 : 200);
+  }
 }
 
 function checkAlert(data) {
@@ -1072,7 +1095,7 @@ window.addEventListener('load', () => {
     const initialData = JSON.parse(document.getElementById('scannerData').textContent);
     const meta = JSON.parse(document.getElementById('scannerMeta').textContent);
 
-    renderData(initialData);
+    renderData(initialData, false);
 
     setTimeout(() => {
       try { chart.timeScale().fitContent(); } catch(e) {}
@@ -1110,7 +1133,7 @@ window.addEventListener('load', () => {
         .then(r => r.json())
         .then(newData => {
           if (newData && !newData.error) {
-            renderData(newData);
+            renderData(newData, true);
             statusEl.textContent = 'Live · Auto-refresh: 30s';
           } else {
             statusEl.textContent = 'Refresh error';

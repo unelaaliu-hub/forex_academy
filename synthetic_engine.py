@@ -20,9 +20,10 @@ try:
 except ImportError:
     websocket = None
 
-DERIV_API_TOKEN = "pat_ee21491213e73e23f6eef2425d58a74f1b3ec9efe932357a8b9d7dac3129308f"
+# --- YOUR PERSONAL DERIV APP ID ---
+APP_ID = "34CcOO91GQuNu9OZ0PdDO"
 
-APP_ID = 1
+DERIV_API_TOKEN = "pat_ee21491213e73e23f6eef2425d58a74f1b3ec9efe932357a8b9d7dac3129308f"
 
 DERIV_ENDPOINTS = [
     f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
