@@ -1,6 +1,6 @@
 """
 Synthetic Indices Engine — Deriv WebSocket API (websocket-client, sync)
-Drop Origin header + suppress_origin=True to bypass Cloudflare 520.
+Python 3.14 safe — no asyncio.Lock usage.
 """
 import json
 import time

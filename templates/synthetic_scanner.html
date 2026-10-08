@@ -59,6 +59,9 @@
   .strategy-tag { display:inline-block; padding:3px 8px; border-radius:4px; font-size:10px; letter-spacing:1px; background:rgba(0,212,230,0.1); color:var(--cyan); border:1px solid rgba(0,212,230,0.3); margin-bottom:8px; font-family:var(--font-cyber); }
   .kv { display:flex; justify-content:space-between; padding:6px 0; font-size:13px; border-bottom:1px solid rgba(255,255,255,0.04); }
   .kv:last-child { border-bottom:none; }
+  .error-panel { background:rgba(220,38,38,0.08); border:2px solid rgba(220,38,38,0.5); border-radius:12px; padding:20px; text-align:center; }
+  .error-title { font-family:var(--font-cyber); font-size:14px; letter-spacing:2px; color:var(--red); margin-bottom:10px; }
+  .error-body { font-size:12px; color:#c8d0dc; line-height:1.6; word-break:break-word; }
 </style>
 {% endblock %}
 
@@ -66,20 +69,18 @@
 <div class="scanner-header">
   <div>
     <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:4px;">SYNTHETIC INDICES SCANNER</div>
-    <h1 class="symbol-title" id="symbolTitle">{{ data.name | default('—') }}</h1>
+    <h1 class="symbol-title" id="symbolTitle">R_75</h1>
     <div class="price-big" id="priceDisplay">—</div>
     <div class="refresh-info">
       <span class="dot" id="statusDot"></span>
-      <span id="refreshStatus">Live · Auto-refresh: 30s</span>
+      <span id="refreshStatus">Connecting to Deriv…</span>
     </div>
-    {% if data.data_source %}
-    <div style="font-size:11px; color:var(--gold); letter-spacing:2px; margin-top:4px;">📡 Source: {{ data.data_source }}</div>
-    {% endif %}
+    <div style="font-size:11px; color:var(--gold); letter-spacing:2px; margin-top:4px;" id="sourceLine"></div>
   </div>
   <div>
     <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:6px;">TIMEFRAME</div>
     <div class="tf-buttons">
-      {% for tf in ['1m','5m','15m','1h'] %}
+      {% for tf in ['1m','5m','15m','1h','4h'] %}
       <a href="?symbol={{ current_symbol }}&tf={{ tf }}" class="tf-btn {% if current_tf==tf %}active{% endif %}">{{ tf | upper }}</a>
       {% endfor %}
     </div>
@@ -96,13 +97,6 @@
   ⚠️ <b>Synthetic indices are algorithmic, not real markets.</b> No order flow, no institutional players. This scanner uses mean-reversion (Volatility/Jump), spike-fade (Boom/Crash), and range-fade (Step). Rules are separate from the ICT scanner.
 </div>
 
-{% if data.error %}
-<div class="glass" style="padding:40px; text-align:center;">
-  <div style="color:var(--red); font-family:var(--font-cyber); letter-spacing:2px; margin-bottom:12px;">DATA ERROR</div>
-  <p>{{ data.error }}</p>
-</div>
-{% else %}
-
 <div class="layout">
   <div>
     <div class="glass chart-card">
@@ -116,20 +110,20 @@
   <div>
     <div id="setupPanel" class="setup-panel none">
       <div class="setup-head">
-        <div class="setup-dir" id="setupDir">STANDING BY</div>
+        <div class="setup-dir" id="setupDir">CONNECTING…</div>
         <div class="setup-rr" id="setupRR"></div>
       </div>
       <div id="setupBody">
-        <div style="font-size:12px; color:var(--muted); line-height:1.5;">Loading…</div>
+        <div style="font-size:12px; color:var(--muted); line-height:1.5;">Fetching candles from Deriv…</div>
       </div>
     </div>
 
     <div class="glass panel">
       <div class="panel-title">📈 Market Info</div>
-      <div class="kv"><span style="color:var(--muted);">Symbol</span><span id="infoSym" style="color:#e6ecf5;">{{ data.symbol }}</span></div>
-      <div class="kv"><span style="color:var(--muted);">Kind</span><span id="infoKind" style="color:#e6ecf5;">{{ data.kind }}</span></div>
+      <div class="kv"><span style="color:var(--muted);">Symbol</span><span id="infoSym" style="color:#e6ecf5;">{{ current_symbol }}</span></div>
+      <div class="kv"><span style="color:var(--muted);">Kind</span><span id="infoKind" style="color:#e6ecf5;">—</span></div>
       <div class="kv"><span style="color:var(--muted);">Timeframe</span><span id="infoTf" style="color:#e6ecf5;">{{ current_tf }}</span></div>
-      <div class="kv"><span style="color:var(--muted);">Source</span><span id="infoSrc" style="color:var(--gold);">{{ data.data_source }}</span></div>
+      <div class="kv"><span style="color:var(--muted);">Candles</span><span id="infoCount" style="color:#e6ecf5;">0</span></div>
     </div>
 
     <div class="glass panel">
@@ -144,19 +138,44 @@
   </div>
 </div>
 
-<script id="synthData" type="application/json">{{ data | tojson }}</script>
 <script id="synthMeta" type="application/json">{"symbol": "{{ current_symbol }}", "tf": "{{ current_tf }}"}</script>
-
-{% endif %}
 {% endblock %}
 
 {% block scripts %}
-{% if not data.error %}
 <script>
-let chart, series, maSeries, upSeries, dnSeries, chartEl, svgEl;
-let currentData = null;
-let isRefreshing = false;
+const DERIV_APP_ID = "34CcOO91GQuNu9OZ0PdDO";
+const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${DERIV_APP_ID}`;
 
+const TF_GRAN = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400 };
+
+const SYMBOL_META = {
+  "R_10":     { name: "Volatility 10",  kind: "reversion" },
+  "R_25":     { name: "Volatility 25",  kind: "reversion" },
+  "R_50":     { name: "Volatility 50",  kind: "reversion" },
+  "R_75":     { name: "Volatility 75",  kind: "reversion" },
+  "R_100":    { name: "Volatility 100", kind: "reversion" },
+  "JD10":     { name: "Jump 10",        kind: "reversion" },
+  "JD25":     { name: "Jump 25",        kind: "reversion" },
+  "JD50":     { name: "Jump 50",        kind: "reversion" },
+  "JD75":     { name: "Jump 75",        kind: "reversion" },
+  "JD100":    { name: "Jump 100",       kind: "reversion" },
+  "BOOM500":  { name: "Boom 500",       kind: "spike" },
+  "BOOM1000": { name: "Boom 1000",      kind: "spike" },
+  "CRASH500": { name: "Crash 500",      kind: "spike" },
+  "CRASH1000":{ name: "Crash 1000",     kind: "spike" },
+  "STPRNG":   { name: "Step Index",     kind: "step" },
+};
+
+const META = JSON.parse(document.getElementById('synthMeta').textContent);
+const SYMBOL = META.symbol;
+const TIMEFRAME = META.tf;
+
+let chart, candleSeries, maSeries, upSeries, dnSeries, chartEl, svgEl;
+let currentData = null;
+let currentSetup = null;
+let isFetching = false;
+
+// ---------- CHART SETUP ----------
 function initChart() {
   chartEl = document.getElementById('chart');
   svgEl = document.getElementById('overlay');
@@ -165,8 +184,11 @@ function initChart() {
   chart = LightweightCharts.createChart(chartEl, {
     width: chartEl.clientWidth,
     height: 620,
-    layout: { background: { color: 'transparent' }, textColor: '#9aa4b2',
-              fontFamily: "'Trebuchet MS', 'Rajdhani', sans-serif" },
+    layout: {
+      background: { color: 'transparent' },
+      textColor: '#9aa4b2',
+      fontFamily: "'Trebuchet MS', 'Rajdhani', sans-serif"
+    },
     grid: {
       vertLines: { color: 'rgba(255,255,255,0.035)' },
       horzLines: { color: 'rgba(255,255,255,0.035)' }
@@ -186,7 +208,7 @@ function initChart() {
     }
   });
 
-  series = chart.addCandlestickSeries({
+  candleSeries = chart.addCandlestickSeries({
     upColor: '#26a69a', downColor: '#ef5350',
     borderUpColor: '#26a69a', borderDownColor: '#ef5350',
     wickUpColor: '#26a69a', wickDownColor: '#ef5350',
@@ -198,43 +220,567 @@ function initChart() {
   dnSeries = chart.addLineSeries({ color: 'rgba(167,139,250,0.9)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
 
   chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
-    if (currentData) drawOverlay(currentData);
+    if (currentSetup) drawSetupLines(currentSetup);
   });
 
   return true;
 }
 
-function toY(price) {
-  try {
-    const y = series.priceToCoordinate(price);
-    return (y === null || y === undefined) ? null : y;
-  } catch(e) { return null; }
+// ---------- INDICATORS ----------
+function sma(values, period, idx) {
+  if (idx < period - 1) return null;
+  let sum = 0;
+  for (let i = idx - period + 1; i <= idx; i++) sum += values[i];
+  return sum / period;
 }
 
-function drawOverlay(data) {
+function stdev(values, period, idx, mean) {
+  if (idx < period - 1) return null;
+  let sum = 0;
+  for (let i = idx - period + 1; i <= idx; i++) {
+    const d = values[i] - mean;
+    sum += d * d;
+  }
+  return Math.sqrt(sum / period);
+}
+
+function computeIndicators(candles) {
+  const closes = candles.map(c => c.close);
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+  const n = candles.length;
+
+  const ma = new Array(n).fill(null);
+  const sd = new Array(n).fill(null);
+  const bbUp = new Array(n).fill(null);
+  const bbDn = new Array(n).fill(null);
+  const rsi = new Array(n).fill(null);
+  const atr = new Array(n).fill(null);
+
+  // Bollinger
+  for (let i = 0; i < n; i++) {
+    const m = sma(closes, 20, i);
+    if (m !== null) {
+      const s = stdev(closes, 20, i, m);
+      ma[i] = m;
+      sd[i] = s;
+      bbUp[i] = m + 2 * s;
+      bbDn[i] = m - 2 * s;
+    }
+  }
+
+  // RSI
+  const rsiPeriod = 14;
+  for (let i = rsiPeriod; i < n; i++) {
+    let gainSum = 0, lossSum = 0;
+    for (let j = i - rsiPeriod + 1; j <= i; j++) {
+      const d = closes[j] - closes[j - 1];
+      if (d > 0) gainSum += d;
+      else lossSum += -d;
+    }
+    const avgGain = gainSum / rsiPeriod;
+    const avgLoss = lossSum / rsiPeriod;
+    if (avgLoss === 0) rsi[i] = 100;
+    else {
+      const rs = avgGain / avgLoss;
+      rsi[i] = 100 - (100 / (1 + rs));
+    }
+  }
+
+  // ATR
+  const atrPeriod = 14;
+  for (let i = 0; i < n; i++) {
+    if (i < atrPeriod) continue;
+    let sum = 0;
+    for (let j = i - atrPeriod + 1; j <= i; j++) {
+      const tr = Math.max(
+        highs[j] - lows[j],
+        Math.abs(highs[j] - closes[j - 1]),
+        Math.abs(lows[j] - closes[j - 1])
+      );
+      sum += tr;
+    }
+    atr[i] = sum / atrPeriod;
+  }
+
+  return candles.map((c, i) => ({
+    ...c,
+    ma: ma[i], sd: sd[i], bbUp: bbUp[i], bbDn: bbDn[i],
+    rsi: rsi[i], atr: atr[i]
+  }));
+}
+
+// ---------- STRATEGY HELPERS ----------
+function efficiencyRatio(closes, n) {
+  const len = closes.length;
+  if (len < n + 1) return 0;
+  const window = closes.slice(len - n - 1);
+  const net = Math.abs(window[window.length - 1] - window[0]);
+  let path = 0;
+  for (let i = 1; i < window.length; i++) path += Math.abs(window[i] - window[i - 1]);
+  return path > 0 ? net / path : 0;
+}
+
+function consecutiveBeyondBand(df, side, maxCheck) {
+  let count = 0;
+  const len = df.length;
+  for (let i = len - 1; i >= Math.max(0, len - maxCheck); i--) {
+    const c = df[i].close;
+    const u = df[i].bbUp;
+    const l = df[i].bbDn;
+    if (side === "upper" && u && c > u) count++;
+    else if (side === "lower" && l && c < l) count++;
+    else break;
+  }
+  return count;
+}
+
+function rejectionCandle(df) {
+  if (df.length < 2) return null;
+  const last = df[df.length - 1];
+  const o = last.open, h = last.high, l = last.low, c = last.close;
+  const body = Math.abs(c - o);
+  const rng = h - l;
+  if (rng <= 0) return null;
+  const upperWick = h - Math.max(o, c);
+  const lowerWick = Math.min(o, c) - l;
+  if (upperWick > body * 1.5 && upperWick > rng * 0.5) return "bearish";
+  if (lowerWick > body * 1.5 && lowerWick > rng * 0.5) return "bullish";
+  return null;
+}
+
+function rsiDivergence(df, direction) {
+  if (df.length < 4) return false;
+  const hNow = df[df.length - 1].high, hPrev = df[df.length - 2].high;
+  const lNow = df[df.length - 1].low, lPrev = df[df.length - 2].low;
+  const rsiNow = df[df.length - 1].rsi, rsiPrev = df[df.length - 2].rsi;
+  if (rsiNow === null || rsiPrev === null) return false;
+  if (direction === "SELL") return hNow > hPrev && rsiNow < rsiPrev;
+  return lNow < lPrev && rsiNow > rsiPrev;
+}
+
+// ---------- STRATEGIES ----------
+function strategyReversion(df) {
+  if (df.length < 50) return null;
+  const last = df[df.length - 1];
+  const close = last.close, ma = last.ma, up = last.bbUp, dn = last.bbDn;
+  const sd = last.sd, rsi = last.rsi, atr = last.atr;
+
+  if (!ma || !sd || !atr || atr <= 0 || close <= 0) return null;
+
+  const closes = df.map(c => c.close);
+  const er = efficiencyRatio(closes, 20);
+  if (er > 0.50) return null;
+
+  const bandwidthPct = ((up - dn) / ma) * 100;
+  if (bandwidthPct < 0.10) return null;
+
+  let direction = null;
+  if (close > up && rsi >= 68) direction = "SELL";
+  else if (close < dn && rsi <= 32) direction = "BUY";
+  if (!direction) return null;
+
+  const side = direction === "SELL" ? "upper" : "lower";
+  const consecBeyond = consecutiveBeyondBand(df, side, 6);
+  if (consecBeyond > 3) return null;
+
+  const rejection = rejectionCandle(df);
+  const rejectionOK = (rejection === "bearish" && direction === "SELL") ||
+                      (rejection === "bullish" && direction === "BUY");
+  const divergenceOK = rsiDivergence(df, direction);
+
+  const rsiNow = last.rsi, rsiPrev = df[df.length - 2].rsi;
+  const rsiTurning = direction === "SELL" ? rsiNow < rsiPrev : rsiNow > rsiPrev;
+
+  const z = (close - ma) / sd;
+
+  let entry = close, sl, tp1, tp2;
+  if (direction === "BUY") {
+    sl = entry - 1.8 * atr;
+    tp1 = ma;
+    tp2 = up;
+  } else {
+    sl = entry + 1.8 * atr;
+    tp1 = ma;
+    tp2 = dn;
+  }
+
+  const risk = Math.abs(entry - sl);
+  if (risk <= 0) return null;
+  const reward1 = Math.abs(tp1 - entry);
+  const rr = reward1 / risk;
+  if (rr < 1.5) return null;
+
+  const checklist = [];
+  if (direction === "SELL") {
+    checklist.push({ label: "Above Upper Band", pass: true, detail: `${close.toFixed(2)} > ${up.toFixed(2)}` });
+    checklist.push({ label: "RSI Overbought", pass: rsi >= 68, detail: `RSI ${rsi.toFixed(1)}` });
+    checklist.push({ label: "Z-Score ≥ 2.0", pass: z >= 2.0, detail: `z = ${z.toFixed(2)}` });
+    checklist.push({ label: "Not Trending", pass: er <= 0.40, detail: `ER = ${er.toFixed(2)}` });
+    checklist.push({ label: "Fresh Band Touch", pass: consecBeyond <= 2, detail: `${consecBeyond} bar(s) beyond` });
+    checklist.push({ label: "Reversal Confirmation", pass: rejectionOK || divergenceOK,
+                     detail: rejectionOK ? "Bearish wick" : (divergenceOK ? "RSI divergence" : "None") });
+    checklist.push({ label: "RSI Turning Down", pass: rsiTurning, detail: `${rsiPrev.toFixed(1)} → ${rsiNow.toFixed(1)}` });
+  } else {
+    checklist.push({ label: "Below Lower Band", pass: true, detail: `${close.toFixed(2)} < ${dn.toFixed(2)}` });
+    checklist.push({ label: "RSI Oversold", pass: rsi <= 32, detail: `RSI ${rsi.toFixed(1)}` });
+    checklist.push({ label: "Z-Score ≤ -2.0", pass: z <= -2.0, detail: `z = ${z.toFixed(2)}` });
+    checklist.push({ label: "Not Trending", pass: er <= 0.40, detail: `ER = ${er.toFixed(2)}` });
+    checklist.push({ label: "Fresh Band Touch", pass: consecBeyond <= 2, detail: `${consecBeyond} bar(s) beyond` });
+    checklist.push({ label: "Reversal Confirmation", pass: rejectionOK || divergenceOK,
+                     detail: rejectionOK ? "Bullish wick" : (divergenceOK ? "RSI divergence" : "None") });
+    checklist.push({ label: "RSI Turning Up", pass: rsiTurning, detail: `${rsiPrev.toFixed(1)} → ${rsiNow.toFixed(1)}` });
+  }
+  checklist.push({ label: "R:R ≥ 1.5", pass: rr >= 1.5, detail: `1 : ${rr.toFixed(2)}` });
+
+  const pts = checklist.filter(c => c.pass).length;
+  let confidence = null;
+  if (pts >= 7) confidence = "HIGH";
+  else if (pts >= 5) confidence = "MEDIUM";
+  else return null;
+
+  return {
+    direction, entry, sl, tp1, tp2, rr, confidence,
+    strategy: "Mean Reversion",
+    checklist, score: pts, total: checklist.length,
+    note: `Fade extreme deviation (Z=${z.toFixed(2)}, ER=${er.toFixed(2)}). Target midline at ${ma.toFixed(2)}.`
+  };
+}
+
+function strategySpike(df) {
+  if (df.length < 40) return null;
+  const bodies = df.map(c => Math.abs(c.close - c.open));
+  const avgBodies = new Array(df.length).fill(null);
+  for (let i = 30; i < df.length; i++) {
+    let sum = 0;
+    for (let j = i - 29; j <= i; j++) sum += bodies[j];
+    avgBodies[i] = sum / 30;
+  }
+
+  const last = df[df.length - 1];
+  const atr = last.atr;
+  if (!atr || atr <= 0) return null;
+
+  let spikeIdx = null, spikeDir = null;
+  for (let i = Math.max(0, df.length - 5); i < df.length; i++) {
+    if (i < 30) continue;
+    const b = bodies[i], a = avgBodies[i];
+    if (!a || a <= 0) continue;
+    if (b > a * 3.0) {
+      spikeIdx = i;
+      spikeDir = df[i].close > df[i].open ? "UP" : "DOWN";
+    }
+  }
+  if (spikeIdx === null) return null;
+
+  const close = last.close;
+  const spikeRange = Math.abs(df[spikeIdx].close - df[spikeIdx].open);
+  const direction = spikeDir === "UP" ? "SELL" : "BUY";
+
+  let entry = close, sl, tp1, tp2;
+  if (direction === "BUY") {
+    sl = entry - 1.5 * atr;
+    tp1 = entry + 1.0 * atr;
+    tp2 = entry + 2.0 * atr;
+  } else {
+    sl = entry + 1.5 * atr;
+    tp1 = entry - 1.0 * atr;
+    tp2 = entry - 2.0 * atr;
+  }
+
+  const risk = Math.abs(entry - sl);
+  if (risk <= 0) return null;
+  const rr = Math.abs(tp1 - entry) / risk;
+
+  const checklist = [
+    { label: "Spike Detected", pass: true, detail: `${spikeDir} spike ${spikeRange.toFixed(2)} pts` },
+    { label: "Fade Direction", pass: true, detail: `${direction} into retracement` },
+    { label: "ATR Reasonable", pass: atr > 0, detail: `ATR ${atr.toFixed(2)}` },
+    { label: "R:R ≥ 1.5", pass: rr >= 1.5, detail: `1 : ${rr.toFixed(2)}` }
+  ];
+
+  const pts = checklist.filter(c => c.pass).length;
+  const confidence = pts >= 4 ? "HIGH" : (pts >= 3 ? "MEDIUM" : null);
+  if (!confidence) return null;
+
+  return {
+    direction, entry, sl, tp1, tp2, rr, confidence,
+    strategy: "Spike Fade",
+    checklist, score: pts, total: checklist.length,
+    note: "Fade the spike — retracement is the play"
+  };
+}
+
+function strategyStep(df) {
+  if (df.length < 60) return null;
+  const last = df[df.length - 1];
+  const close = last.close, atr = last.atr, ma = last.ma;
+  if (!atr || !ma || atr <= 0 || ma <= 0) return null;
+
+  const lookback = Math.min(60, df.length - 1);
+  const recent = df.slice(-lookback);
+  const rangeHigh = Math.max(...recent.map(c => c.high));
+  const rangeLow = Math.min(...recent.map(c => c.low));
+  if (rangeHigh <= rangeLow) return null;
+
+  let direction = null;
+  if (close >= rangeHigh * 0.999) direction = "SELL";
+  else if (close <= rangeLow * 1.001) direction = "BUY";
+  if (!direction) return null;
+
+  let entry = close, sl, tp1, tp2;
+  if (direction === "BUY") {
+    sl = entry - 1.5 * atr;
+    tp1 = ma;
+    tp2 = rangeHigh;
+  } else {
+    sl = entry + 1.5 * atr;
+    tp1 = ma;
+    tp2 = rangeLow;
+  }
+
+  const risk = Math.abs(entry - sl);
+  if (risk <= 0) return null;
+  const rr = Math.abs(tp1 - entry) / risk;
+
+  const checklist = [
+    { label: "At Range Boundary", pass: true,
+      detail: `${direction === 'SELL' ? 'Top' : 'Bottom'} of ${lookback}-bar range` },
+    { label: "Range Width", pass: (rangeHigh - rangeLow) / atr >= 3,
+      detail: `${((rangeHigh - rangeLow) / atr).toFixed(1)}x ATR` },
+    { label: "R:R ≥ 1.5", pass: rr >= 1.5, detail: `1 : ${rr.toFixed(2)}` }
+  ];
+
+  const pts = checklist.filter(c => c.pass).length;
+  const confidence = pts >= 3 ? "HIGH" : (pts >= 2 ? "MEDIUM" : null);
+  if (!confidence) return null;
+
+  return {
+    direction, entry, sl, tp1, tp2, rr, confidence,
+    strategy: "Range Fade",
+    checklist, score: pts, total: checklist.length,
+    note: "Fade the boundary — target the mean"
+  };
+}
+
+function runStrategy(df, kind) {
+  if (kind === "reversion") return strategyReversion(df);
+  if (kind === "spike") return strategySpike(df);
+  if (kind === "step") return strategyStep(df);
+  return null;
+}
+
+// ---------- WEBSOCKET ----------
+function fetchFromDeriv() {
+  if (isFetching) return;
+  isFetching = true;
+
+  const statusEl = document.getElementById('refreshStatus');
+  const dot = document.getElementById('statusDot');
+  statusEl.textContent = "Connecting to Deriv…";
+  if (dot) dot.classList.add('busy');
+
+  const url = WS_URL;
+  const ws = new WebSocket(url);
+  let settled = false;
+
+  const timeout = setTimeout(() => {
+    if (!settled) {
+      settled = true;
+      try { ws.close(); } catch(e) {}
+      showError("Deriv took too long to respond (15s). Try again.");
+      isFetching = false;
+      if (dot) dot.classList.remove('busy');
+    }
+  }, 15000);
+
+  ws.onopen = () => {
+    const gran = TF_GRAN[TIMEFRAME] || 300;
+    ws.send(JSON.stringify({
+      ticks_history: SYMBOL,
+      adjust_start_time: 1,
+      count: 500,
+      end: "latest",
+      start: 1,
+      style: "candles",
+      granularity: gran,
+      subscribe: 0
+    }));
+  };
+
+  ws.onmessage = (evt) => {
+    if (settled) return;
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch(e) { return; }
+
+    if (msg.error) {
+      settled = true;
+      clearTimeout(timeout);
+      try { ws.close(); } catch(e) {}
+      showError("Deriv: " + (msg.error.message || JSON.stringify(msg.error)));
+      isFetching = false;
+      if (dot) dot.classList.remove('busy');
+      return;
+    }
+
+    if (msg.candles) {
+      settled = true;
+      clearTimeout(timeout);
+      try { ws.close(); } catch(e) {}
+
+      const raw = msg.candles;
+      const candles = raw.map(c => ({
+        time: parseInt(c.epoch),
+        open: parseFloat(c.open),
+        high: parseFloat(c.high),
+        low: parseFloat(c.low),
+        close: parseFloat(c.close)
+      }));
+
+      handleCandles(candles);
+      isFetching = false;
+      if (dot) dot.classList.remove('busy');
+    }
+  };
+
+  ws.onerror = () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    showError("WebSocket connection to Deriv failed.");
+    isFetching = false;
+    if (dot) dot.classList.remove('busy');
+  };
+
+  ws.onclose = () => {
+    if (!settled) {
+      settled = true;
+      clearTimeout(timeout);
+      showError("Connection closed before receiving data.");
+      isFetching = false;
+      if (dot) dot.classList.remove('busy');
+    }
+  };
+}
+
+// ---------- RENDER ----------
+function handleCandles(candles) {
+  const enriched = computeIndicators(candles);
+  currentData = enriched;
+
+  const last = enriched[enriched.length - 1];
+  const meta = SYMBOL_META[SYMBOL];
+
+  // Chart
+  const chartCandles = enriched.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }));
+  candleSeries.setData(chartCandles);
+
+  const maLine = enriched.filter(c => c.ma !== null).map(c => ({ time: c.time, value: c.ma }));
+  const upLine = enriched.filter(c => c.bbUp !== null).map(c => ({ time: c.time, value: c.bbUp }));
+  const dnLine = enriched.filter(c => c.bbDn !== null).map(c => ({ time: c.time, value: c.bbDn }));
+  maSeries.setData(maLine);
+  upSeries.setData(upLine);
+  dnSeries.setData(dnLine);
+
+  setTimeout(() => { try { chart.timeScale().fitContent(); } catch(e) {} }, 100);
+
+  // Header
+  document.getElementById('symbolTitle').textContent = meta ? meta.name : SYMBOL;
+  document.getElementById('priceDisplay').textContent = last.close.toFixed(2);
+  document.getElementById('sourceLine').textContent = `📡 Source: DERIV (browser)`;
+  document.getElementById('refreshStatus').textContent = `Live · Auto-refresh: 30s`;
+  document.getElementById('infoSym').textContent = SYMBOL;
+  document.getElementById('infoKind').textContent = meta ? meta.kind : '—';
+  document.getElementById('infoTf').textContent = TIMEFRAME;
+  document.getElementById('infoCount').textContent = enriched.length;
+
+  // Strategy
+  const kind = meta ? meta.kind : null;
+  const setup = runStrategy(enriched, kind);
+  currentSetup = setup;
+
+  renderSetupPanel(setup, enriched);
+  drawSetupLines(setup);
+}
+
+function renderSetupPanel(setup, df) {
+  const panel = document.getElementById('setupPanel');
+  const dirEl = document.getElementById('setupDir');
+  const rrEl = document.getElementById('setupRR');
+  const body = document.getElementById('setupBody');
+
+  if (!setup) {
+    panel.className = 'setup-panel none';
+    dirEl.textContent = 'NO SETUP';
+    rrEl.textContent = '';
+    const kind = SYMBOL_META[SYMBOL] ? SYMBOL_META[SYMBOL].kind : 'unknown';
+    let hint = '';
+    if (kind === 'reversion') hint = 'Waiting for extreme deviation from the mean. Signals only fire at Bollinger Band extremes with reversal confirmation.';
+    else if (kind === 'spike') hint = 'Waiting for a fresh spike to fade. Boom/Crash spikes are unpredictable — patience required.';
+    else if (kind === 'step') hint = 'Waiting for price at a range boundary.';
+    body.innerHTML = `<div style="font-size:12px; color:var(--muted); line-height:1.5;">${hint}</div>`;
+    return;
+  }
+
+  const isBuy = setup.direction === 'BUY';
+  panel.className = 'setup-panel ' + (isBuy ? 'buy' : 'sell');
+  dirEl.textContent = (isBuy ? '▲ BUY' : '▼ SELL') + ' · ' + setup.confidence;
+  rrEl.textContent = 'R:R 1 : ' + setup.rr.toFixed(2);
+
+  const px = (v) => v.toFixed(2);
+  let html = `<div class="strategy-tag">${setup.strategy}</div>`;
+  html += '<div class="setup-prices">';
+  html += `<div><div class="lbl">ENTRY</div><span>${px(setup.entry)}</span></div>`;
+  html += `<div><div class="lbl">SL</div><span style="color:var(--red);">${px(setup.sl)}</span></div>`;
+  html += `<div><div class="lbl">TP1</div><span style="color:var(--green);">${px(setup.tp1)}</span></div>`;
+  html += `<div><div class="lbl">TP2</div><span style="color:var(--green);">${px(setup.tp2)}</span></div>`;
+  html += '</div>';
+  html += '<div class="checklist">';
+  setup.checklist.forEach(c => {
+    const cls = c.pass ? 'pass' : 'fail';
+    const ic = c.pass ? '✅' : '❌';
+    html += `<div class="checklist-row ${cls}"><span class="ic">${ic}</span><span class="lbl">${c.label}<div class="detail">${c.detail}</div></span></div>`;
+  });
+  html += '</div>';
+  html += `<div class="setup-hint">${setup.note}</div>`;
+  body.innerHTML = html;
+}
+
+function drawSetupLines(setup) {
   if (!svgEl) return;
   svgEl.innerHTML = '';
-  const rect = svgEl.getBoundingClientRect();
-  const w = rect.width || 800;
-  svgEl.setAttribute('viewBox', `0 0 ${w} ${rect.height || 620}`);
-
-  const setup = data.setup;
   if (!setup) return;
 
-  const rightPad = 220;
+  const rect = svgEl.getBoundingClientRect();
+  const w = rect.width || 800;
+  const h = rect.height || 620;
+  svgEl.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svgEl.setAttribute('width', w);
+  svgEl.setAttribute('height', h);
+
+  const toY = (price) => {
+    try {
+      const y = candleSeries.priceToCoordinate(price);
+      return (y === null || y === undefined) ? null : y;
+    } catch(e) { return null; }
+  };
+
   const draw = (price, color, label) => {
     const y = toY(price);
     if (y === null) return;
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    line.setAttribute('x1', Math.max(0, w - rightPad));
+    line.setAttribute('x1', 0);
     line.setAttribute('x2', w);
-    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('y1', y);
+    line.setAttribute('y2', y);
     line.setAttribute('stroke', color);
     line.setAttribute('stroke-width', '2');
-    line.setAttribute('stroke-dasharray', '4 2');
+    line.setAttribute('stroke-dasharray', '5 3');
+    line.setAttribute('opacity', '0.9');
     svgEl.appendChild(line);
+
     const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    t.setAttribute('x', Math.max(0, w - rightPad) + 4);
+    t.setAttribute('x', w - 55);
     t.setAttribute('y', y - 3);
     t.setAttribute('fill', color);
     t.setAttribute('font-family', 'Orbitron, sans-serif');
@@ -253,133 +799,40 @@ function drawOverlay(data) {
   draw(setup.tp2, '#22c55e', 'TP2');
 }
 
-function renderData(data) {
-  if (!data || data.error) return;
-  currentData = data;
-
-  const candles = data.candles.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }));
-  series.setData(candles);
-  maSeries.setData(data.ma_line.map(p => ({ time: p.time, value: p.value })));
-  upSeries.setData(data.bb_up_line.map(p => ({ time: p.time, value: p.value })));
-  dnSeries.setData(data.bb_dn_line.map(p => ({ time: p.time, value: p.value })));
-
-  const priceEl = document.getElementById('priceDisplay');
-  if (priceEl && data.last_price > 0) {
-    priceEl.textContent = data.last_price.toFixed(2);
-  }
-
+function showError(msg) {
   const panel = document.getElementById('setupPanel');
   const dirEl = document.getElementById('setupDir');
   const rrEl = document.getElementById('setupRR');
   const body = document.getElementById('setupBody');
 
-  const s = data.setup;
-  if (!s) {
-    panel.className = 'setup-panel none';
-    dirEl.textContent = 'NO SETUP';
-    rrEl.textContent = '';
-    const kindLabel = data.kind === 'reversion' ? 'extreme deviation from the mean'
-      : data.kind === 'spike' ? 'a fresh spike to fade'
-      : 'price at a range boundary';
-    body.innerHTML = `<div style="font-size:12px; color:var(--muted); line-height:1.5;">Waiting for ${kindLabel}. Signals only fire at extremes.</div>`;
-    setTimeout(() => drawOverlay(data), 200);
-    return;
-  }
+  panel.className = 'setup-panel none';
+  panel.style.borderColor = 'rgba(220,38,38,0.6)';
+  panel.style.background = 'rgba(220,38,38,0.06)';
+  dirEl.textContent = 'DATA ERROR';
+  dirEl.style.color = 'var(--red)';
+  rrEl.textContent = '';
+  body.innerHTML = `<div style="font-size:12px; color:#c8d0dc; line-height:1.6; word-break:break-word;">${msg}</div>`;
 
-  const isBuy = s.direction === 'BUY';
-  panel.className = 'setup-panel ' + (isBuy ? 'buy' : 'sell');
-  dirEl.textContent = (isBuy ? '▲ BUY' : '▼ SELL') + ' · ' + s.confidence;
-  rrEl.textContent = 'R:R 1 : ' + s.rr.toFixed(2);
-
-  const px = (v) => v.toFixed(2);
-  let html = `<div class="strategy-tag">${s.strategy}</div>`;
-  html += '<div class="setup-prices">';
-  html += `<div><div class="lbl">ENTRY</div><span>${px(s.entry)}</span></div>`;
-  html += `<div><div class="lbl">SL</div><span style="color:var(--red);">${px(s.sl)}</span></div>`;
-  html += `<div><div class="lbl">TP1</div><span style="color:var(--green);">${px(s.tp1)}</span></div>`;
-  html += `<div><div class="lbl">TP2</div><span style="color:var(--green);">${px(s.tp2)}</span></div>`;
-  html += '</div>';
-  html += '<div class="checklist">';
-  s.checklist.forEach(c => {
-    const cls = c.pass ? 'pass' : 'fail';
-    const ic = c.pass ? '✅' : '❌';
-    html += `<div class="checklist-row ${cls}"><span class="ic">${ic}</span><span class="lbl">${c.label}<div class="detail">${c.detail}</div></span></div>`;
-  });
-  html += '</div>';
-  html += `<div class="setup-hint">${s.note}</div>`;
-  body.innerHTML = html;
-
-  setTimeout(() => drawOverlay(data), 200);
+  document.getElementById('refreshStatus').textContent = 'Error — retrying in 30s';
 }
 
-function setBusy(busy) {
-  const dot = document.getElementById('statusDot');
-  if (!dot) return;
-  if (busy) dot.classList.add('busy');
-  else dot.classList.remove('busy');
-}
-
+// ---------- BOOT ----------
 window.addEventListener('load', () => {
   setTimeout(() => {
     if (!initChart()) return;
-    const initialData = JSON.parse(document.getElementById('synthData').textContent);
-    const meta = JSON.parse(document.getElementById('synthMeta').textContent);
-    renderData(initialData);
+    fetchFromDeriv();
 
-    setTimeout(() => {
-      try { chart.timeScale().fitContent(); } catch(e) {}
-      if (currentData) drawOverlay(currentData);
-    }, 300);
-
-    let countdown = 30;
-    const statusEl = document.getElementById('refreshStatus');
     setInterval(() => {
-      countdown--;
-      if (countdown > 0) {
-        statusEl.textContent = `Live · Next refresh in ${countdown}s`;
-        return;
-      }
-      if (isRefreshing) {
-        countdown = 30;
-        statusEl.textContent = 'Still refreshing...';
-        return;
-      }
-      countdown = 30;
-      isRefreshing = true;
-      setBusy(true);
-      statusEl.textContent = 'Refreshing...';
-
-      const controller = new AbortController();
-      const tid = setTimeout(() => controller.abort(), 15000);
-
-      fetch(`/api/synthetic?symbol=${meta.symbol}&tf=${meta.tf}`, { cache: 'no-store', signal: controller.signal })
-        .then(r => r.json())
-        .then(nd => {
-          if (nd && !nd.error) {
-            renderData(nd);
-            statusEl.textContent = 'Live · Auto-refresh: 30s';
-          } else {
-            statusEl.textContent = nd.error || 'Refresh error';
-          }
-        })
-        .catch(err => {
-          statusEl.textContent = err.name === 'AbortError' ? 'Timed out' : 'Connection error';
-        })
-        .finally(() => {
-          clearTimeout(tid);
-          isRefreshing = false;
-          setBusy(false);
-        });
-    }, 1000);
+      fetchFromDeriv();
+    }, 30000);
 
     window.addEventListener('resize', () => {
       try {
         chart.applyOptions({ width: chartEl.clientWidth });
-        if (currentData) drawOverlay(currentData);
+        if (currentSetup) drawSetupLines(currentSetup);
       } catch(e) {}
     });
-  }, 400);
+  }, 300);
 });
 </script>
-{% endif %}
 {% endblock %}
