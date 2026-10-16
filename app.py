@@ -1,5 +1,6 @@
 import os
 import sys
+import random
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from flask import Flask, render_template, redirect, url_for, request, jsonify
@@ -8,6 +9,7 @@ from animations import ANIMATIONS
 import scanner_engine
 import backtest_engine
 import synthetic_engine
+import crt_engine
 
 app = Flask(__name__)
 
@@ -15,16 +17,48 @@ app = Flask(__name__)
 # ---------- CURRICULUM ----------
 @app.route('/')
 def index():
-    return render_template('index.html', lessons=LESSONS, modules=MODULES)
+    grouped = {}
+    for slug, lesson in LESSONS.items():
+        mod = lesson.get("module", "Other")
+        if mod not in grouped:
+            grouped[mod] = []
+        lesson_with_slug = dict(lesson)
+        lesson_with_slug["slug"] = slug
+        grouped[mod].append(lesson_with_slug)
+
+    for mod in grouped:
+        grouped[mod].sort(key=lambda x: x.get("number", 0))
+
+    ordered_modules = {}
+    for mod_name in MODULES.keys():
+        if mod_name in grouped:
+            ordered_modules[mod_name] = grouped[mod_name]
+
+    return render_template(
+        'index.html',
+        lessons=LESSONS,
+        modules=ordered_modules,
+        modules_meta=MODULES,
+    )
 
 
-@app.route('/lesson/<int:lesson_id>')
-def lesson(lesson_id):
-    lesson_data = next((l for l in LESSONS if l['id'] == lesson_id), None)
+@app.route('/lesson/<slug>')
+def lesson(slug):
+    lesson_data = LESSONS.get(slug)
     if not lesson_data:
         return redirect(url_for('index'))
-    anim = ANIMATIONS.get(lesson_id) if isinstance(ANIMATIONS, dict) else None
-    return render_template('lesson.html', lesson=lesson_data, animation=anim)
+
+    lesson_with_slug = dict(lesson_data)
+    lesson_with_slug["slug"] = slug
+
+    anim = None
+    if isinstance(ANIMATIONS, dict):
+        num = lesson_data.get("number")
+        anim = ANIMATIONS.get(num) or ANIMATIONS.get(slug)
+    if anim is None:
+        anim = lesson_data.get("animation")
+
+    return render_template('lesson.html', lesson=lesson_with_slug, animation=anim)
 
 
 @app.route('/glossary')
@@ -103,6 +137,35 @@ def api_synthetic():
         return jsonify({"error": str(e)})
 
 
+# ---------- CRT SCANNER ----------
+@app.route('/crt-scanner')
+def crt_scanner():
+    symbol = request.args.get('symbol', 'XAUUSD').upper()
+    timeframe = request.args.get('tf', '15m')
+    if timeframe not in ('15m', '1h', '4h', '1d'):
+        timeframe = '15m'
+    try:
+        result = crt_engine.analyze(symbol, timeframe)
+    except Exception as e:
+        result = {"error": str(e)}
+    return render_template('crt_v2.html', data=result,
+                           current_symbol=symbol, current_tf=timeframe)
+
+
+@app.route('/api/crt-scanner')
+def api_crt_scanner():
+    symbol = request.args.get('symbol', 'XAUUSD').upper()
+    timeframe = request.args.get('tf', '15m')
+    if timeframe not in ('15m', '1h', '4h', '1d'):
+        timeframe = '15m'
+    try:
+        result = crt_engine.analyze(symbol, timeframe)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+# ---------- MULTI SCANNER ----------
 @app.route('/multi-scanner')
 def multi_scanner():
     timeframe = request.args.get('tf', '1h')
@@ -117,6 +180,7 @@ def multi_scanner():
     return render_template('multi_scanner.html', results=results, current_tf=timeframe)
 
 
+# ---------- BACKTEST ----------
 @app.route('/backtest', methods=['GET', 'POST'])
 def backtest_page():
     if request.method == 'POST':
@@ -141,6 +205,98 @@ def api_backtest():
         return jsonify({"error": str(e)})
 
 
+# ---------- GAME: SPOT THE SETUP ----------
+GAME_SYMBOLS = ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD']
+GAME_TIMEFRAMES = ['15m', '1h', '4h']
+
+
+@app.route('/game')
+def game():
+    return render_template('game.html')
+
+
+@app.route('/api/game-round')
+def api_game_round():
+    try:
+        symbol = random.choice(GAME_SYMBOLS)
+        timeframe = random.choice(GAME_TIMEFRAMES)
+
+        df, live_px, src = scanner_engine.fetch_data_with_live(symbol, timeframe)
+        if df is None or len(df) < 230:
+            # Retry once with a different symbol if data is thin
+            symbol = 'XAUUSD'
+            df, live_px, src = scanner_engine.fetch_data_with_live(symbol, '1h')
+            if df is None or len(df) < 230:
+                return jsonify({"error": "Not enough historical data"})
+
+        VISIBLE = 180
+        FUTURE = 40
+        total_needed = VISIBLE + FUTURE
+
+        subset = df.tail(total_needed).copy()
+        visible_df = subset.iloc[:VISIBLE].copy()
+        future_df = subset.iloc[VISIBLE:].copy()
+
+        # Structure on the visible portion
+        visible_sw = scanner_engine.find_swings(visible_df.copy(), timeframe)
+        structure = scanner_engine.detect_structure(visible_sw)
+        trend = structure.get("trend", "RANGING")
+
+        # Price moves in the future portion
+        entry_price = float(visible_df["close"].iloc[-1])
+        highest = float(future_df["high"].max())
+        lowest = float(future_df["low"].min())
+        move_up = highest - entry_price
+        move_down = entry_price - lowest
+
+        # ATR from visible window for dynamic thresholds
+        tr = (visible_df["high"] - visible_df["low"]).tail(14)
+        atr = float(tr.mean()) if len(tr) else 0.0
+
+        up_thresh = atr * 1.5
+        down_thresh = atr * 1.5
+
+        if move_up >= up_thresh and move_up > move_down * 1.5:
+            correct = 'BUY'
+        elif move_down >= down_thresh and move_down > move_up * 1.5:
+            correct = 'SELL'
+        else:
+            correct = 'NONE'
+
+        def row_to_candle(idx, row):
+            try:
+                return {
+                    "time": int(idx.timestamp()),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                }
+            except Exception:
+                return None
+
+        visible_candles = [c for c in (row_to_candle(i, r) for i, r in visible_df.iterrows()) if c]
+        future_candles = [c for c in (row_to_candle(i, r) for i, r in future_df.iterrows()) if c]
+
+        cutoff_time = int(visible_df.index[-1].timestamp())
+
+        return jsonify({
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "structure_trend": trend,
+            "candles": visible_candles,
+            "future_candles": future_candles,
+            "cutoff_time": cutoff_time,
+            "correct": correct,
+            "move_up": round(move_up, 2),
+            "move_down": round(move_down, 2),
+            "source": src,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+# ---------- OTHER PAGES ----------
 @app.route('/journal')
 def journal():
     return render_template('journal.html')
@@ -151,12 +307,6 @@ def alerts():
     return render_template('alerts.html')
 
 
-@app.route('/game')
-def game():
-    return render_template('game.html')
-
-
-# ---------- ARMOR ----------
 @app.route('/risk-of-ruin')
 def risk_of_ruin():
     return render_template('risk_of_ruin.html')

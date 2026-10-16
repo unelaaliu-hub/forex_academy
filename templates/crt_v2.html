@@ -1,0 +1,389 @@
+{% extends "base.html" %}
+{% block title %}CRT Scanner | Forex Academy{% endblock %}
+
+{% block head %}
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  .scanner-header { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:20px; flex-wrap:wrap; gap:16px; }
+  .symbol-title { font-family:var(--font-cyber); font-size:26px; letter-spacing:4px; margin:0 0 6px 0; }
+  .price-big { font-family:var(--font-cyber); font-size:34px; color:var(--cyan); }
+  .refresh-info { font-size:12px; color:var(--muted); margin-top:4px; }
+  .refresh-info .dot { display:inline-block; width:6px; height:6px; background:var(--green); border-radius:50%; margin-right:6px; animation:pulseDot 2s infinite; }
+  @keyframes pulseDot { 0%,100% { opacity:0.4; } 50% { opacity:1; } }
+  .data-source { font-size:11px; color:var(--gold); letter-spacing:2px; margin-top:4px; }
+
+  .tf-buttons { display:flex; gap:6px; }
+  .tf-btn { padding:8px 14px; background:#0a0c12; border:1px solid rgba(255,255,255,0.08); color:var(--muted); font-family:var(--font-cyber); font-size:11px; letter-spacing:2px; cursor:pointer; border-radius:6px; text-decoration:none; }
+  .tf-btn.active { background:rgba(0,212,230,0.1); color:var(--cyan); border-color:var(--cyan); }
+
+  .symbol-btns { display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap; }
+  .symbol-btn { padding:8px 14px; background:#0a0c12; border:1px solid rgba(255,255,255,0.08); color:var(--muted); font-family:var(--font-cyber); font-size:11px; letter-spacing:1.5px; cursor:pointer; border-radius:6px; text-decoration:none; }
+  .symbol-btn.active { background:rgba(0,212,230,0.1); color:var(--cyan); border-color:var(--cyan); }
+
+  .layout { display:grid; grid-template-columns:1fr 420px; gap:22px; }
+  @media (max-width: 1100px) { .layout { grid-template-columns:1fr; } }
+
+  .chart-card { padding:12px; }
+  .chart-container { position:relative; width:100%; height:640px; }
+  #chart { width:100%; height:640px; }
+  #crtOverlay { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; overflow:hidden; z-index:10; }
+
+  .panel { padding:18px; margin-bottom:16px; }
+  .panel-title { font-family:var(--font-cyber); font-size:11px; letter-spacing:3px; color:var(--cyan); margin:0 0 12px 0; text-transform:uppercase; }
+
+  .warning-banner { background:rgba(230,184,0,0.08); border:1px solid rgba(230,184,0,0.3); border-radius:8px; padding:12px 16px; margin-bottom:20px; font-size:13px; color:#c8d0dc; line-height:1.5; }
+
+  .signal-panel { padding:18px; border-radius:12px; border:2px solid; margin-bottom:16px; }
+  .signal-panel.buy { border-color:rgba(34,197,94,0.6); background:rgba(34,197,94,0.06); }
+  .signal-panel.sell { border-color:rgba(220,38,38,0.6); background:rgba(220,38,38,0.06); }
+  .signal-panel.none { border-color:rgba(107,114,128,0.3); background:rgba(107,114,128,0.04); }
+  .signal-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+  .signal-dir { font-family:var(--font-cyber); font-size:17px; letter-spacing:2px; font-weight:700; }
+  .signal-panel.buy .signal-dir { color:var(--green); }
+  .signal-panel.sell .signal-dir { color:var(--red); }
+  .signal-panel.none .signal-dir { color:var(--cyan); }
+  .signal-rr { font-family:var(--font-cyber); font-size:12px; color:var(--cyan); letter-spacing:1.5px; }
+  .signal-prices { display:flex; justify-content:space-between; font-size:12px; padding:6px 0 10px 0; border-bottom:1px solid rgba(255,255,255,0.06); margin-bottom:10px; }
+  .signal-prices span { font-family:'Courier New', monospace; color:#e6ecf5; }
+  .signal-prices .lbl { color:var(--muted); font-family:var(--font-cyber); font-size:10px; letter-spacing:1px; }
+  .checklist { display:flex; flex-direction:column; gap:5px; }
+  .checklist-row { display:flex; align-items:flex-start; gap:8px; font-size:12px; line-height:1.4; }
+  .checklist-row .ic { flex-shrink:0; }
+  .checklist-row .lbl { color:#c8d0dc; flex:1; }
+  .checklist-row .detail { color:var(--muted); font-size:11px; }
+  .checklist-row.pass .lbl { color:#e6ecf5; font-weight:600; }
+  .checklist-row.fail .lbl { color:#8b95a5; }
+  .signal-hint { margin-top:10px; font-size:11px; color:var(--muted); font-style:italic; }
+  .badge { display:inline-block; padding:3px 10px; border-radius:12px; font-size:10px; font-family:var(--font-cyber); letter-spacing:1.5px; font-weight:700; }
+  .badge-HIGH { background:rgba(34,197,94,0.2); color:var(--green); }
+  .badge-MEDIUM { background:rgba(230,184,0,0.2); color:var(--gold); }
+  .badge-LOW { background:rgba(107,114,128,0.2); color:var(--muted); }
+
+  .bias-panel { padding:14px 18px; border-radius:10px; border:1px solid rgba(255,255,255,0.08); margin-bottom:16px; background:rgba(0,0,0,0.3); }
+  .bias-panel.open { border-color:var(--green); background:rgba(34,197,94,0.08); }
+  .bias-panel.closed { border-color:var(--red); background:rgba(220,38,38,0.06); }
+  .bias-row { display:flex; justify-content:space-between; font-size:13px; padding:4px 0; }
+  .bias-label { color:var(--muted); letter-spacing:1px; font-family:var(--font-cyber); font-size:11px; }
+  .bias-val { font-weight:700; font-family:var(--font-cyber); font-size:12px; }
+  .bias-val.BULLISH { color:var(--green); }
+  .bias-val.BEARISH { color:var(--red); }
+  .bias-val.RANGING { color:var(--gold); }
+  .bias-tier { font-size:11px; color:var(--cyan); font-family:var(--font-cyber); }
+  .bias-reason { font-size:11px; color:#c8d0dc; margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.06); }
+
+  .pattern-list { display:flex; flex-direction:column; gap:8px; }
+  .pattern-item { padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.06); background:rgba(0,0,0,0.25); font-size:12px; }
+  .pattern-item.bull { border-left:3px solid var(--green); }
+  .pattern-item.bear { border-left:3px solid var(--red); }
+  .pattern-row { display:flex; justify-content:space-between; padding:2px 0; }
+  .pattern-label { color:var(--muted); }
+  .pattern-val { color:#e6ecf5; font-family:'Courier New', monospace; font-weight:600; }
+  .pattern-time { font-size:10px; color:var(--muted); margin-top:4px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="scanner-header">
+  <div>
+    <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:4px;">CRT SCANNER</div>
+    <h1 class="symbol-title">{{ data.symbol | default(current_symbol) }}</h1>
+    <div class="price-big" id="priceDisplay">—</div>
+    <div class="refresh-info"><span class="dot"></span><span id="refreshStatus">Live · Auto-refresh 30s</span></div>
+    {% if data.data_source %}<div class="data-source">📡 {{ data.data_source }}</div>{% endif %}
+  </div>
+  <div>
+    <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:6px;">TIMEFRAME</div>
+    <div class="tf-buttons">
+      {% for tf in ['15m','1h','4h','1d'] %}
+      <a href="?symbol={{ current_symbol }}&tf={{ tf }}" class="tf-btn {% if current_tf==tf %}active{% endif %}">{{ tf | upper }}</a>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<div class="symbol-btns">
+  {% for sym in ['XAUUSD','EURUSD','GBPUSD','USDJPY','AUDUSD','BTCUSD','ETHUSD'] %}
+  <a href="?symbol={{ sym }}&tf={{ current_tf }}" class="symbol-btn {% if current_symbol==sym %}active{% endif %}">{{ sym }}</a>
+  {% endfor %}
+</div>
+
+<div class="warning-banner">
+  ⚠️ <b>CRT pattern scanner.</b> Looks for 3-candle sweeps (C1 range → C2 manipulation → C3 distribution). Not a signal service. 40-50% of these will fail.
+</div>
+
+{% if data.error %}
+<div class="glass" style="padding:40px; text-align:center;">
+  <div style="color:var(--red); font-family:var(--font-cyber); letter-spacing:2px; margin-bottom:12px;">DATA ERROR</div>
+  <p>{{ data.error }}</p>
+</div>
+{% else %}
+
+<div class="layout">
+  <div>
+    <div class="glass chart-card">
+      <div class="chart-container">
+        <div id="chart"></div>
+        <svg id="crtOverlay"></svg>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    {% if data.bias %}
+    <div class="bias-panel {% if data.bias.allow_buy or data.bias.allow_sell %}open{% else %}closed{% endif %}">
+      <div class="bias-row"><span class="bias-label">D1 TREND</span><span class="bias-val {{ data.bias.d1_trend }}">{{ data.bias.d1_trend }}</span></div>
+      <div class="bias-row"><span class="bias-label">H4 TREND</span><span class="bias-val {{ data.bias.h4_trend }}">{{ data.bias.h4_trend }}</span></div>
+      <div class="bias-row" style="margin-top:6px; padding-top:6px; border-top:1px solid rgba(255,255,255,0.06);">
+        <span class="bias-label">BIAS TIER</span><span class="bias-tier">{{ data.bias.tier | default('—') }}</span>
+      </div>
+      <div class="bias-reason">{{ data.bias.reason }}</div>
+    </div>
+    {% endif %}
+
+    <div id="signalPanel" class="signal-panel none">
+      <div class="signal-head">
+        <div class="signal-dir" id="signalDir">NO ACTIVE CRT</div>
+        <div class="signal-rr" id="signalRR"></div>
+      </div>
+      <div id="signalBody">
+        <div style="font-size:12px; color:var(--muted); line-height:1.5;">
+          Waiting for a 3-candle CRT pattern to complete on this timeframe.
+        </div>
+      </div>
+    </div>
+
+    <div class="glass panel">
+      <div class="panel-title">🕐 Session</div>
+      <div style="font-size:14px; color:#e6ecf5;">{{ data.killzone }}</div>
+    </div>
+
+    <div class="glass panel">
+      <div class="panel-title">📋 Recent CRT Patterns</div>
+      <div class="pattern-list" id="patternList">
+        <div style="font-size:12px; color:var(--muted);">No patterns detected yet.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script id="crtData" type="application/json">{{ data | tojson }}</script>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if not data.error %}
+<script>
+const IS_DAILY = ("{{ current_tf }}" === "1d");
+let chart, series, chartEl, svgEl;
+let currentData = null;
+let layer = null;
+
+function toChartTime(t) {
+  if (!IS_DAILY) return t;
+  const d = new Date(t * 1000);
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+}
+
+function initChart() {
+  chartEl = document.getElementById('chart');
+  svgEl = document.getElementById('crtOverlay');
+  if (!chartEl || !svgEl) return false;
+
+  chart = LightweightCharts.createChart(chartEl, {
+    width: chartEl.clientWidth, height: 640,
+    layout: { background: { color:'transparent' }, textColor:'#9aa4b2', fontFamily:"'Trebuchet MS','Rajdhani',sans-serif" },
+    grid: { vertLines: { color:'rgba(255,255,255,0.035)' }, horzLines: { color:'rgba(255,255,255,0.035)' } },
+    rightPriceScale: { borderColor:'rgba(255,255,255,0.08)', scaleMargins:{ top:0.08, bottom:0.08 } },
+    timeScale: { borderColor:'rgba(255,255,255,0.08)', timeVisible: !IS_DAILY, secondsVisible:false, rightOffset:5 }
+  });
+
+  series = chart.addCandlestickSeries({
+    upColor:'#26a69a', downColor:'#ef5350',
+    borderUpColor:'#26a69a', borderDownColor:'#ef5350',
+    wickUpColor:'#26a69a', wickDownColor:'#ef5350', borderVisible:false
+  });
+
+  chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+    if (currentData) drawOverlay(currentData);
+  });
+
+  return true;
+}
+
+function toX(t) {
+  try {
+    const x = chart.timeScale().timeToCoordinate(toChartTime(t));
+    return (x === null || x === undefined) ? null : x;
+  } catch(e) { return null; }
+}
+
+function toY(p) {
+  try {
+    const y = series.priceToCoordinate(p);
+    return (y === null || y === undefined) ? null : y;
+  } catch(e) { return null; }
+}
+
+function drawOverlay(data) {
+  if (layer) { layer.remove(); layer = null; }
+  if (!data || !data.patterns) return;
+
+  const rect = svgEl.getBoundingClientRect();
+  svgEl.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`);
+  svgEl.setAttribute('width', rect.width);
+  svgEl.setAttribute('height', rect.height);
+  layer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  svgEl.appendChild(layer);
+
+  data.patterns.forEach(p => {
+    const x1 = toX(p.c1_time);
+    const x3 = toX(p.c3_time);
+    const yHigh = toY(p.c1_high);
+    const yLow  = toY(p.c1_low);
+    if (x1 === null || x3 === null || yHigh === null || yLow === null) return;
+
+    const w = Math.max(x3 - x1, 6);
+    const h = Math.max(Math.abs(yLow - yHigh), 2);
+    const top = Math.min(yHigh, yLow);
+
+    const isBull = p.type === 'CRT_BULL';
+    const fill = isBull ? 'rgba(34,197,94,0.10)' : 'rgba(220,38,38,0.10)';
+    const stroke = isBull ? 'rgba(34,197,94,0.9)' : 'rgba(220,38,38,0.9)';
+
+    const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    r.setAttribute('x', x1); r.setAttribute('y', top);
+    r.setAttribute('width', w); r.setAttribute('height', h);
+    r.setAttribute('fill', fill); r.setAttribute('stroke', stroke);
+    r.setAttribute('stroke-dasharray', '3 3');
+    r.setAttribute('stroke-width', '1');
+    layer.appendChild(r);
+
+    // Sweep marker
+    const xS = toX(p.c2_time);
+    const yS = toY(p.sweep_price);
+    if (xS !== null && yS !== null) {
+      const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      c.setAttribute('cx', xS); c.setAttribute('cy', yS); c.setAttribute('r', '4');
+      c.setAttribute('fill', isBull ? '#26a69a' : '#ef5350');
+      layer.appendChild(c);
+    }
+  });
+}
+
+function fmt(v) { return v < 100 ? v.toFixed(4) : v.toFixed(2); }
+
+function renderSignal(sig) {
+  const panel = document.getElementById('signalPanel');
+  const dir = document.getElementById('signalDir');
+  const rr = document.getElementById('signalRR');
+  const body = document.getElementById('signalBody');
+
+  if (!sig) {
+    panel.className = 'signal-panel none';
+    dir.textContent = 'NO ACTIVE CRT';
+    rr.textContent = '';
+    body.innerHTML = '<div style="font-size:12px; color:var(--muted); line-height:1.5;">Waiting for a 3-candle CRT pattern to complete on this timeframe.</div>';
+    return;
+  }
+
+  const isBuy = sig.direction === 'BUY';
+  panel.className = 'signal-panel ' + (isBuy ? 'buy' : 'sell');
+  dir.innerHTML = (isBuy ? '▲ BUY' : '▼ SELL') + ' <span class="badge badge-' + sig.confidence + '">' + sig.confidence + '</span>';
+  rr.textContent = 'R:R 1 : ' + sig.rr1.toFixed(2);
+
+  let html = '<div class="signal-prices">';
+  html += '<div><div class="lbl">ENTRY</div><span>' + fmt(sig.entry) + '</span></div>';
+  html += '<div><div class="lbl">SL</div><span style="color:var(--red);">' + fmt(sig.sl) + '</span></div>';
+  html += '<div><div class="lbl">TP1</div><span style="color:var(--green);">' + fmt(sig.tp1) + '</span></div>';
+  html += '<div><div class="lbl">TP2</div><span style="color:var(--green);">' + fmt(sig.tp2) + '</span></div>';
+  html += '</div>';
+  html += '<div class="checklist">';
+  sig.checklist.forEach(c => {
+    html += '<div class="checklist-row ' + (c.pass ? 'pass' : 'fail') + '">';
+    html += '<span class="ic">' + (c.pass ? '✅' : '❌') + '</span>';
+    html += '<span class="lbl">' + c.label + '<div class="detail">' + c.detail + '</div></span>';
+    html += '</div>';
+  });
+  html += '</div>';
+  html += '<div class="signal-hint">Take 70% off at TP1, move SL to breakeven on the rest.</div>';
+  body.innerHTML = html;
+}
+
+function renderPatterns(list) {
+  const el = document.getElementById('patternList');
+  if (!list || !list.length) {
+    el.innerHTML = '<div style="font-size:12px; color:var(--muted);">No patterns detected yet.</div>';
+    return;
+  }
+  el.innerHTML = list.map(p => {
+    const isBull = p.type === 'CRT_BULL';
+    const t = new Date(p.c3_time * 1000);
+    const ts = t.toISOString().slice(5, 16).replace('T', ' ');
+    return `<div class="pattern-item ${isBull ? 'bull' : 'bear'}">
+      <div class="pattern-row"><span class="pattern-label">Type</span><span class="pattern-val">${isBull ? 'BULLISH CRT' : 'BEARISH CRT'}</span></div>
+      <div class="pattern-row"><span class="pattern-label">C1 range</span><span class="pattern-val">${fmt(p.c1_low)} – ${fmt(p.c1_high)}</span></div>
+      <div class="pattern-row"><span class="pattern-label">C2 swept</span><span class="pattern-val">${p.sweep_side} @ ${fmt(p.sweep_price)}</span></div>
+      <div class="pattern-row"><span class="pattern-label">R:R</span><span class="pattern-val">1 : ${p.rr1.toFixed(2)}</span></div>
+      <div class="pattern-time">C3 closed ${ts} UTC</div>
+    </div>`;
+  }).join('');
+}
+
+function renderData(data) {
+  if (!data || data.error) return;
+  currentData = data;
+
+  const candles = (data.candles || []).map(c => ({
+    time: toChartTime(c.time),
+    open: c.open, high: c.high, low: c.low, close: c.close
+  }));
+  const seen = new Set();
+  const unique = [];
+  candles.forEach(c => {
+    const k = JSON.stringify(c.time);
+    if (!seen.has(k)) { seen.add(k); unique.push(c); }
+  });
+  series.setData(unique);
+
+  const priceEl = document.getElementById('priceDisplay');
+  const px = (data.live_price && data.live_price > 0) ? data.live_price : data.last_price;
+  if (priceEl && px) priceEl.textContent = '$' + fmt(px);
+
+  renderSignal(data.active_signal);
+  renderPatterns(data.patterns || []);
+  requestAnimationFrame(() => drawOverlay(data));
+  setTimeout(() => drawOverlay(data), 400);
+  setTimeout(() => drawOverlay(data), 1000);
+}
+
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    if (!initChart()) return;
+    const d = JSON.parse(document.getElementById('crtData').textContent);
+    renderData(d);
+    setTimeout(() => { try { chart.timeScale().fitContent(); } catch(e) {} }, 200);
+
+    let count = 30;
+    const statusEl = document.getElementById('refreshStatus');
+    setInterval(() => {
+      count--;
+      if (count > 0) { statusEl.textContent = `Live · Next refresh ${count}s`; return; }
+      count = 30;
+      statusEl.textContent = 'Refreshing...';
+      fetch(`/api/crt-scanner?symbol={{ current_symbol }}&tf={{ current_tf }}`, { cache:'no-store' })
+        .then(r => r.json())
+        .then(nd => {
+          if (nd && !nd.error) { renderData(nd); statusEl.textContent = 'Live · Auto-refresh 30s'; }
+          else statusEl.textContent = 'Refresh error';
+        })
+        .catch(() => statusEl.textContent = 'Connection error');
+    }, 1000);
+
+    window.addEventListener('resize', () => {
+      try { chart.applyOptions({ width: chartEl.clientWidth }); if (currentData) drawOverlay(currentData); } catch(e){}
+    });
+  }, 400);
+});
+</script>
+{% endif %}
+{% endblock %}

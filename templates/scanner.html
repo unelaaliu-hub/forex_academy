@@ -120,6 +120,31 @@
 
   .waiting-list { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
   .waiting-row { font-size:12px; color:#c8d0dc; line-height:1.5; padding-left:2px; }
+
+  .planned-stack { display:flex; flex-direction:column; gap:12px; margin-top:14px; }
+
+  .planned-box { padding:12px 14px; border-radius:8px; background:rgba(0,212,230,0.04); border:1px dashed rgba(0,212,230,0.5); }
+  .planned-box.aggressive { border-color:rgba(251,146,60,0.65); background:rgba(251,146,60,0.05); }
+  .planned-box.conservative { border-color:rgba(96,165,250,0.65); background:rgba(96,165,250,0.04); }
+
+  .planned-title { font-family:var(--font-cyber); font-size:10px; letter-spacing:2px; margin-bottom:8px; }
+  .planned-box.aggressive .planned-title { color:#fb923c; }
+  .planned-box.conservative .planned-title { color:#60a5fa; }
+
+  .planned-sub { font-size:11px; color:#c8d0dc; margin-bottom:10px; line-height:1.5; }
+  .planned-grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; }
+  .planned-cell { text-align:center; }
+  .planned-cell .lbl { color:var(--muted); font-family:var(--font-cyber); font-size:9px; letter-spacing:1px; margin-bottom:2px; }
+  .planned-cell .val { font-family:'Courier New', monospace; font-size:12px; font-weight:700; }
+  .planned-cell .planned-basis { font-size:9px; color:var(--muted); margin-top:3px; line-height:1.3; }
+  .planned-rr { font-size:10px; color:var(--muted); margin-top:8px; text-align:right; }
+
+  .planned-tag { display:inline-block; padding:1px 6px; border-radius:3px; font-size:9px; letter-spacing:1px; margin-left:6px; }
+  .planned-box.aggressive .planned-tag { background:rgba(251,146,60,0.15); color:#fb923c; }
+  .planned-box.conservative .planned-tag { background:rgba(96,165,250,0.15); color:#60a5fa; }
+
+  #tp1ManagementPanel { display: none; background: rgba(34,197,94,0.1); border: 1px solid var(--green); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px; color: #e6ecf5; line-height: 1.5; text-align: center; }
+  #tp1ManagementPanel b { color: var(--green); }
 </style>
 {% endblock %}
 
@@ -190,11 +215,17 @@
       <label class="toggle-item active" id="toggleSessionLabel">
         <input type="checkbox" id="toggleSession" checked onchange="toggleLayer('SESSION', this)"> Sessions
       </label>
+      <label class="toggle-item active" id="toggleOTELabel">
+        <input type="checkbox" id="toggleOTE" checked onchange="toggleLayer('OTE', this)"> OTE Levels
+      </label>
       <label class="toggle-item" id="toggleSetupLabel">
         <input type="checkbox" id="toggleSetup" onchange="toggleLayer('SETUP', this)"> Trade Setups
       </label>
       <label class="toggle-item active" id="toggleSwingLabel">
         <input type="checkbox" id="toggleSwing" checked onchange="toggleLayer('SWING', this)"> Swing Markers
+      </label>
+      <label class="toggle-item" id="toggleCounterTrendLabel">
+        <input type="checkbox" id="toggleCounterTrend" onchange="toggleCounterTrend(this)"> Show Counter-Trend
       </label>
     </div>
 
@@ -207,6 +238,11 @@
   </div>
 
   <div>
+    <div id="tp1ManagementPanel">
+      🚨 <b>TP1 HIT!</b><br>
+      Take <b>70% off</b> the table. Move <b>SL to Breakeven</b>.
+    </div>
+
     {% if data.bias %}
     <div class="bias-panel {% if data.bias.allow_buy or data.bias.allow_sell %}open{% else %}closed{% endif %}" id="biasPanel">
       <div class="bias-row">
@@ -224,6 +260,13 @@
       <div class="bias-reason" id="biasReason">{{ data.bias.reason }}</div>
     </div>
     {% endif %}
+
+    <div class="glass panel">
+      <div class="panel-title">⚖️ SMT Divergence</div>
+      <div id="smtStatus" style="font-size:13px; color:var(--muted);">
+        Data feed inactive. Awaiting backend integration.
+      </div>
+    </div>
 
     <div id="setupPanel" class="setup-panel none">
       <div class="setup-head">
@@ -305,6 +348,19 @@
   <div id="zonePopupBody"></div>
 </div>
 
+<div id="tp1AlertOverlay" style="display:none; position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(220,38,38,0.85); z-index:9999; align-items:center; justify-content:center; text-align:center;">
+  <div style="background:#0a0c12; border:4px solid #ef5350; padding:40px; border-radius:20px; box-shadow:0 0 60px rgba(239,68,68,0.8);">
+    <div style="font-size:60px; margin-bottom:20px;">🚨</div>
+    <div style="font-family:var(--font-cyber); font-size:32px; color:#ef5350; letter-spacing:4px; margin-bottom:20px;">TP1 HIT!</div>
+    <div style="font-family:'Trebuchet MS', sans-serif; font-size:20px; color:#e6ecf5; line-height:1.6;">
+      Take <b>70% off</b> the table.<br>
+      Move <b>Stop Loss to Breakeven</b> immediately.
+    </div>
+    <button onclick="document.getElementById('tp1AlertOverlay').style.display='none'; document.getElementById('tp1AlertOverlay').classList.remove('show')" 
+            style="margin-top:30px; padding:15px 40px; background:#ef5350; color:#0a0c12; border:none; border-radius:8px; font-family:var(--font-cyber); font-size:16px; font-weight:700; cursor:pointer; letter-spacing:2px;">GOT IT</button>
+  </div>
+</div>
+
 <script id="scannerData" type="application/json">{{ data | tojson }}</script>
 <script id="scannerMeta" type="application/json">{"symbol": "{{ current_symbol }}", "tf": "{{ current_tf }}"}</script>
 
@@ -321,9 +377,70 @@ let lastOandaPrice = null;
 let isRefreshing = false;
 let rangeRedrawPending = false;
 
-const show = { OB: true, FVG: true, POOL: true, PDHL: true, SESSION: true, SETUP: false, SWING: true };
+const show = { OB: true, FVG: true, POOL: true, PDHL: true, SESSION: true, OTE: true, SETUP: false, SWING: true };
+let showCounterTrend = false;
 const MAX_SWINGS_PER_SIDE = 5;
 let lastZoneSig = null;
+
+const _planCache = {};
+const PLAN_LOCK_MS = 5 * 60 * 1000;
+
+let _lastEngineSetup = null;
+let _lastEngineSetupTs = 0;
+
+let _waitingCache = null;
+const WAITING_LOCK_MS = 60 * 1000;
+
+let _alertedSetups = {};
+
+function playAlertSound() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.setValueAtTime(440, ctx.currentTime + 0.15);
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0.1, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.5);
+  } catch(e) {
+    console.log('Audio not supported', e);
+  }
+}
+
+function checkTP1Alert(data) {
+  const buy = data.buy_setup;
+  const sell = data.sell_setup;
+  const current = data.candles && data.candles.length ? data.candles[data.candles.length - 1].close : 0;
+  if (current <= 0) return;
+
+  const checkSetup = (setup) => {
+    if (!setup || !setup.tp1) return;
+    const key = `${setup.direction}|${setup.entry.toFixed(2)}|${setup.tp1.toFixed(2)}`;
+    if (_alertedSetups[key]) return;
+
+    let hit = false;
+    if (setup.direction === 'BUY' && current >= setup.tp1) hit = true;
+    if (setup.direction === 'SELL' && current <= setup.tp1) hit = true;
+
+    if (hit) {
+      _alertedSetups[key] = true;
+      playAlertSound();
+      const overlay = document.getElementById('tp1AlertOverlay');
+      if (overlay) overlay.style.display = 'flex';
+      const mgmtPanel = document.getElementById('tp1ManagementPanel');
+      if (mgmtPanel) mgmtPanel.style.display = 'block';
+    }
+  };
+
+  checkSetup(buy);
+  checkSetup(sell);
+}
 
 function isOandaSource(src) {
   if (!src) return false;
@@ -428,6 +545,7 @@ function toggleLayer(key, checkbox) {
     key === 'POOL'    ? 'togglePoolLabel'    :
     key === 'PDHL'    ? 'togglePDHLLabel'    :
     key === 'SESSION' ? 'toggleSessionLabel' :
+    key === 'OTE'     ? 'toggleOTELabel'     :
     key === 'SETUP'   ? 'toggleSetupLabel'   :
                         'toggleSwingLabel'
   );
@@ -436,6 +554,14 @@ function toggleLayer(key, checkbox) {
     else label.classList.remove('active');
   }
   if (currentData) drawZones(currentData);
+}
+
+function toggleCounterTrend(checkbox) {
+  showCounterTrend = checkbox.checked;
+  const label = document.getElementById('toggleCounterTrendLabel');
+  if (checkbox.checked) label.classList.add('active');
+  else label.classList.remove('active');
+  if (currentData) renderData(currentData, true);
 }
 
 function drawSwingMarkers() {
@@ -576,6 +702,67 @@ function drawSessionLevels(data) {
   });
 }
 
+function drawOTELevels(data) {
+  if (!show.OTE || !data.swing_high_markers || !data.swing_low_markers) return;
+  
+  const highs = data.swing_high_markers;
+  const lows = data.swing_low_markers;
+  if (highs.length === 0 || lows.length === 0) return;
+  
+  const lastHigh = highs[highs.length - 1];
+  const lastLow = lows[lows.length - 1];
+  
+  let legStart, legEnd, dir;
+  if (lastHigh.time > lastLow.time) {
+     legStart = lastLow; legEnd = lastHigh; dir = 'BULL';
+  } else {
+     legStart = lastHigh; legEnd = lastLow; dir = 'BEAR';
+  }
+  
+  const range = Math.abs(legEnd.price - legStart.price);
+  if (range <= 0) return;
+  
+  let ote1, ote2;
+  if (dir === 'BULL') {
+      ote1 = legEnd.price - range * 0.618;
+      ote2 = legEnd.price - range * 0.79;
+  } else {
+      ote1 = legEnd.price + range * 0.618;
+      ote2 = legEnd.price + range * 0.79;
+  }
+  
+  const w = svgEl.clientWidth || 800;
+  const drawOteLine = (price, label) => {
+    const y = toY(price);
+    if (y === null) return;
+    
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', w - 260); line.setAttribute('x2', w);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('stroke', '#fbbf24');
+    line.setAttribute('stroke-width', '1.5');
+    line.setAttribute('stroke-dasharray', '4 4');
+    line.setAttribute('opacity', '0.9');
+    zoneLayer.appendChild(line);
+    
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', w - 256);
+    t.setAttribute('y', y - 3);
+    t.setAttribute('fill', '#fbbf24');
+    t.setAttribute('font-family', 'Orbitron, sans-serif');
+    t.setAttribute('font-size', '9');
+    t.setAttribute('font-weight', '700');
+    t.setAttribute('paint-order', 'stroke');
+    t.setAttribute('stroke', '#000');
+    t.setAttribute('stroke-width', '2');
+    t.textContent = label;
+    zoneLayer.appendChild(t);
+  };
+  
+  drawOteLine(ote1, 'OTE 61.8%');
+  drawOteLine(ote2, 'OTE 79.0%');
+}
+
 function drawSetupLevels(data) {
   if (!show.SETUP) return;
   const setup = data.buy_setup || data.sell_setup;
@@ -682,6 +869,7 @@ function drawZones(data) {
 
   drawPDHLines(data);
   drawSessionLevels(data);
+  drawOTELevels(data);
 
   if (show.OB) {
     const bullOBs = (data.obs || []).filter(z => z.type === 'OB_BULL' && z.time >= firstCandleUnix);
@@ -789,9 +977,315 @@ function updateBiasPanel(bias) {
   else panel.className = 'bias-panel closed';
 }
 
+function updateSMTPanel(data) {
+  const panel = document.getElementById('smtStatus');
+  if (!panel) return;
+  
+  if (data.smt_divergence) {
+    panel.innerHTML = data.smt_divergence;
+    if (data.smt_divergence.includes('BEARISH')) {
+        panel.style.color = 'var(--red)';
+    } else if (data.smt_divergence.includes('BULLISH')) {
+        panel.style.color = 'var(--green)';
+    } else {
+        panel.style.color = 'var(--muted)';
+    }
+  } else {
+    panel.innerHTML = 'Data feed inactive. Awaiting backend integration.';
+    panel.style.color = 'var(--muted)';
+  }
+}
+
 function fmtPx(v) {
   if (v === null || v === undefined || isNaN(v)) return '—';
   return v < 100 ? v.toFixed(4) : v.toFixed(2);
+}
+
+function _atrFromCandles(candles, period) {
+  if (!candles || candles.length < period + 1) return 0;
+  let sum = 0;
+  for (let i = candles.length - period; i < candles.length; i++) {
+    const tr = Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i - 1].close),
+      Math.abs(candles[i].low - candles[i - 1].close)
+    );
+    sum += tr;
+  }
+  return sum / period;
+}
+
+function buildSetupResult(data, mode, target, dir, isChase, isPrePlan) {
+  const current = data.candles[data.candles.length - 1].close;
+  const atr = _atrFromCandles(data.candles, 14);
+  if (atr <= 0) return null;
+
+  const planKey = `${mode}|${dir}|${target.label}|${target.top.toFixed(3)}|${target.bottom.toFixed(3)}`;
+  const cached = _planCache[planKey];
+  const now = Date.now();
+  if (cached && (now - cached.ts) < PLAN_LOCK_MS) {
+    return cached.setup;
+  }
+
+  let entry;
+  if (mode === 'aggressive') {
+    entry = dir === 'SELL' ? target.top : target.bottom;
+  } else {
+    entry = dir === 'SELL' ? target.bottom : target.top;
+  }
+
+  let sl, slBasis;
+
+  if (mode === 'aggressive') {
+    let structuralSL;
+    if (dir === 'SELL') {
+      const swingsAbove = (data.swing_high_markers || [])
+        .map(h => h.price)
+        .filter(p => p > target.top - atr * 0.2)
+        .sort((a, b) => a - b);
+      structuralSL = swingsAbove.length
+        ? Math.max(swingsAbove[0], target.top) + atr * 0.5
+        : target.top + atr * 1.5;
+    } else {
+      const swingsBelow = (data.swing_low_markers || [])
+        .map(l => l.price)
+        .filter(p => p < target.bottom + atr * 0.2)
+        .sort((a, b) => b - a);
+      structuralSL = swingsBelow.length
+        ? Math.min(swingsBelow[0], target.bottom) - atr * 0.5
+        : target.bottom - atr * 1.5;
+    }
+
+    const minDist = atr * 1.5;
+    const curDist = Math.abs(structuralSL - entry);
+    if (curDist < minDist) {
+      sl = dir === 'SELL' ? entry + minDist : entry - minDist;
+      slBasis = 'Min 1.5 ATR (structural too tight)';
+    } else {
+      sl = structuralSL;
+      slBasis = dir === 'SELL' ? 'Swing high + 0.5 ATR' : 'Swing low + 0.5 ATR';
+    }
+  } else {
+    if (dir === 'SELL') {
+      sl = target.top + atr * 0.5;
+      slBasis = 'OB top + 0.5 ATR';
+    } else {
+      sl = target.bottom - atr * 0.5;
+      slBasis = 'OB bottom - 0.5 ATR';
+    }
+  }
+
+  if (dir === 'SELL' && sl <= entry) return null;
+  if (dir === 'BUY' && sl >= entry) return null;
+
+  const tpPool = [];
+  if (dir === 'SELL') {
+    (data.pools || []).forEach(p => {
+      if (p.type === 'SSL' && p.price < entry) tpPool.push({ price: p.price, basis: 'SSL pool' });
+    });
+    if (data.sessions) {
+      Object.entries(data.sessions).forEach(([name, s]) => {
+        if (s.low && s.low < entry) tpPool.push({ price: s.low, basis: name + ' low' });
+      });
+    }
+    if (data.pdl && data.pdl < entry) tpPool.push({ price: data.pdl, basis: 'PDL' });
+    if (data.dealing_range && data.dealing_range.low < entry) {
+      tpPool.push({ price: data.dealing_range.low, basis: 'Deal range low' });
+    }
+    tpPool.sort((a, b) => b.price - a.price);
+  } else {
+    (data.pools || []).forEach(p => {
+      if (p.type === 'BSL' && p.price > entry) tpPool.push({ price: p.price, basis: 'BSL pool' });
+    });
+    if (data.sessions) {
+      Object.entries(data.sessions).forEach(([name, s]) => {
+        if (s.high && s.high > entry) tpPool.push({ price: s.high, basis: name + ' high' });
+      });
+    }
+    if (data.pdh && data.pdh > entry) tpPool.push({ price: data.pdh, basis: 'PDH' });
+    if (data.dealing_range && data.dealing_range.high > entry) {
+      tpPool.push({ price: data.dealing_range.high, basis: 'Deal range high' });
+    }
+    tpPool.sort((a, b) => a.price - b.price);
+  }
+
+  const deduped = [];
+  tpPool.forEach(t => {
+    if (!deduped.some(d => Math.abs(d.price - t.price) < atr * 0.3)) deduped.push(t);
+  });
+
+  let valid = deduped.filter(t => Math.abs(t.price - entry) >= atr);
+  if (!valid.length && deduped.length > 0) {
+    valid = [deduped[0]];
+  }
+  if (!valid.length) return null;
+
+  const tp1Obj = valid[0];
+  const tp2Obj = valid.length >= 2 ? valid[1] : null;
+
+  const tp1 = tp1Obj.price;
+  const tp2 = tp2Obj ? tp2Obj.price : (dir === 'SELL'
+    ? entry - (entry - tp1) * 1.5
+    : entry + (tp1 - entry) * 1.5);
+
+  const risk = Math.abs(entry - sl);
+  if (risk <= 0) return null;
+  const reward1 = Math.abs(tp1 - entry);
+  const reward2 = Math.abs(tp2 - entry);
+  const rr1 = reward1 / risk;
+  const rr2 = reward2 / risk;
+
+  if (!showCounterTrend) {
+    if (data.premium_discount && data.premium_discount.position) {
+      const pos = data.premium_discount.position.toUpperCase();
+      if (dir === 'BUY' && pos === 'PREMIUM') return null;
+      if (dir === 'SELL' && pos === 'DISCOUNT') return null;
+    }
+  }
+
+  const inZone = current >= (target.bottom - atr * 0.3) && current <= (target.top + atr * 0.3);
+
+  const result = {
+    direction: dir,
+    entry,
+    sl, slBasis,
+    tp1, tp1Basis: tp1Obj.basis,
+    tp2, tp2Basis: tp2Obj ? tp2Obj.basis : 'Extension',
+    rr1, rr2,
+    zoneLabel: target.label,
+    targetTop: target.top,
+    targetBottom: target.bottom,
+    inZone,
+    distanceAtr: Math.abs(current - (target.top + target.bottom) / 2) / atr,
+    isChase: isChase,
+    isPrePlan: isPrePlan
+  };
+
+  _planCache[planKey] = { setup: result, ts: now };
+
+  return result;
+}
+
+function computeMomentumChase(data, mode) {
+  if (!data.mss || !data.candles || data.candles.length < 20) return null;
+  
+  const bias = data.bias || {};
+  const h4 = bias.h4_trend;
+  const dir = data.mss.type === 'MSS_BULL' ? 'BUY' : 'SELL';
+
+  if (!showCounterTrend) {
+    if (h4 !== 'BULLISH' && h4 !== 'BEARISH') return null;
+    if (dir === 'BUY' && h4 !== 'BULLISH') return null;
+    if (dir === 'SELL' && h4 !== 'BEARISH') return null;
+  }
+  
+  const target = {
+      label: '🚨 MSS MOMENTUM (CHASE)',
+      top: data.mss.level,
+      bottom: data.mss.level,
+      type: dir === 'BUY' ? 'OB_BULL' : 'OB_BEAR',
+      touches: 0,
+      quality: 0
+  };
+  
+  return buildSetupResult(data, mode, target, dir, true, false);
+}
+
+function computeOBPullback(data, mode) {
+  if (!data.mss || !data.obs || !data.candles || data.candles.length < 20) return null;
+  
+  const bias = data.bias || {};
+  const h4 = bias.h4_trend;
+  const dir = data.mss.type === 'MSS_BULL' ? 'BUY' : 'SELL';
+
+  if (!showCounterTrend) {
+    if (h4 !== 'BULLISH' && h4 !== 'BEARISH') return null;
+    if (dir === 'BUY' && h4 !== 'BULLISH') return null;
+    if (dir === 'SELL' && h4 !== 'BEARISH') return null;
+  }
+  
+  let target = null;
+  let bestDist = Infinity;
+  const current = data.candles[data.candles.length - 1].close;
+
+  (data.obs || []).forEach(z => {
+    if ((z.touches || 0) > 1) return;
+    const isBull = z.type === 'OB_BULL';
+    if (isBull && dir !== 'BUY') return;
+    if (!isBull && dir !== 'SELL') return;
+    const mid = (z.top + z.bottom) / 2;
+    const d = Math.abs(current - mid);
+    if (d < bestDist) { bestDist = d; target = z; }
+  });
+
+  if (!target) return null;
+  
+  return buildSetupResult(data, mode, target, dir, false, false);
+}
+
+function computePrePlan(data, mode) {
+  if (!data.obs || !data.candles || data.candles.length < 20) return null;
+  
+  const bias = data.bias || {};
+  const h4 = bias.h4_trend;
+  let dir = null;
+  if (h4 === 'BULLISH') dir = 'BUY';
+  else if (h4 === 'BEARISH') dir = 'SELL';
+  else return null;
+
+  let target = null;
+  let bestDist = Infinity;
+  const current = data.candles[data.candles.length - 1].close;
+
+  (data.obs || []).forEach(z => {
+    if ((z.touches || 0) > 1) return;
+    const isBull = z.type === 'OB_BULL';
+    if (isBull && dir !== 'BUY') return;
+    if (!isBull && dir !== 'SELL') return;
+    const mid = (z.top + z.bottom) / 2;
+    const d = Math.abs(current - mid);
+    if (d < bestDist) { bestDist = d; target = z; }
+  });
+
+  if (!target) return null;
+  
+  return buildSetupResult(data, mode, target, dir, false, true);
+}
+
+function renderPlannedBox(p, mode, forceChase) {
+  const isBuy = p.direction === 'BUY';
+  const dirColor = isBuy ? 'var(--green)' : 'var(--red)';
+  const dirLabel = isBuy ? '▲ BUY' : '▼ SELL';
+  const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);
+  const distTxt = p.inZone
+    ? '<span style="color:var(--green); font-weight:600;">✅ PRICE IN ZONE</span>'
+    : `<span style="color:var(--muted);">${p.distanceAtr.toFixed(1)} ATR from zone</span>`;
+
+  const rrColor = p.rr1 >= 2 ? 'var(--green)' : (p.rr1 >= 1.5 ? 'var(--gold)' : 'var(--red)');
+
+  const isChase = forceChase || (p.zoneLabel && p.zoneLabel.includes('MOMENTUM'));
+  const boxClass = mode === 'aggressive' ? 'aggressive' : 'conservative';
+  const title = isChase
+    ? '🚨 MOMENTUM CHASE (High Risk)'
+    : (mode === 'aggressive'
+        ? '📋 PLANNED — AGGRESSIVE (OB edge entry)'
+        : '📋 PLANNED — CONSERVATIVE (deep entry)');
+
+  let html = `<div class="planned-box ${boxClass}" style="${isChase ? 'border-color: #ef4444; background: rgba(239, 68, 68, 0.15);' : ''}">`;
+  html += `<div class="planned-title" style="${isChase ? 'color: #ef4444;' : ''}">${title}</div>`;
+  html += `<div class="planned-sub">${dirLabel} <span style="color:var(--muted);">from ${p.zoneLabel}</span><br>${distTxt}</div>`;
+  html += '<div class="planned-grid">';
+  html += `<div class="planned-cell"><div class="lbl">ENTRY</div><div class="val" style="color:${dirColor};">${px(p.entry)}</div></div>`;
+  html += `<div class="planned-cell"><div class="lbl">SL</div><div class="val" style="color:var(--red);">${px(p.sl)}</div><div class="planned-basis">${p.slBasis}</div></div>`;
+  html += `<div class="planned-cell"><div class="lbl">TP1</div><div class="val" style="color:var(--green);">${px(p.tp1)}</div><div class="planned-basis">${p.tp1Basis}</div></div>`;
+  html += `<div class="planned-cell"><div class="lbl">TP2</div><div class="val" style="color:var(--green);">${px(p.tp2)}</div><div class="planned-basis">${p.tp2Basis}</div></div>`;
+  html += '</div>';
+  html += `<div class="planned-rr">R:R TP1 = 1 : <span style="color:${rrColor};">${p.rr1.toFixed(2)}</span> · TP2 = 1 : ${p.rr2.toFixed(2)}</div>`;
+  if (p.rr1 < 1.5) {
+    html += '<div style="font-size:11px; color:var(--red); margin-top:6px;">⚠️ Poor R:R on TP1 — skip this entry</div>';
+  }
+  html += '</div>';
+  return html;
 }
 
 function buildWaitingFor(data) {
@@ -813,6 +1307,18 @@ function buildWaitingFor(data) {
   if (bias.allow_buy && !bias.allow_sell) dir = 'BUY';
   else if (bias.allow_sell && !bias.allow_buy) dir = 'SELL';
 
+  const _mssSig = data.mss ? data.mss.type : 'NONE';
+  const _sig = `${dir}|${_mssSig}`;
+  const _now = Date.now();
+
+  if (_waitingCache && _waitingCache.signature === _sig && (_now - _waitingCache.ts) < WAITING_LOCK_MS) {
+    return {
+      title: _waitingCache.title,
+      subtitle: _waitingCache.subtitle,
+      bullets: _waitingCache.bullets,
+    };
+  }
+
   const lastClose = (data.candles && data.candles.length) ? data.candles[data.candles.length - 1].close : 0;
 
   let atr = 0;
@@ -827,15 +1333,28 @@ function buildWaitingFor(data) {
 
   const mss = data.mss;
   const mssDir = mss ? (mss.type === 'MSS_BULL' ? 'BUY' : 'SELL') : null;
+
+  const currentClose = (data.candles && data.candles.length) ? data.candles[data.candles.length - 1].close : 0;
+  const atrArr = data.candles ? data.candles.slice(-14).map(c => c.high - c.low) : [];
+  const atr14 = atrArr.length ? atrArr.reduce((a,b)=>a+b,0) / atrArr.length : 0;
+
   if (!mss) {
     if (dir === 'BUY' && data.structure && data.structure.last_high) {
-      bullets.push(`MSS trigger — close above ${fmtPx(data.structure.last_high)}`);
+      const dist = Math.abs(data.structure.last_high - currentClose) / (atr14 || 1);
+      if (dist > 2.0) {
+        bullets.push(`⚠️ MSS trigger too far (${dist.toFixed(1)} ATR) — ${fmtPx(data.structure.last_high)}. Wait for structure to develop.`);
+      } else {
+        bullets.push(`MSS trigger — close above ${fmtPx(data.structure.last_high)}`);
+      }
     } else if (dir === 'SELL' && data.structure && data.structure.last_low) {
-      bullets.push(`MSS trigger — close below ${fmtPx(data.structure.last_low)}`);
+      const dist = Math.abs(currentClose - data.structure.last_low) / (atr14 || 1);
+      if (dist > 2.0) {
+        bullets.push(`⚠️ MSS trigger too far (${dist.toFixed(1)} ATR) — ${fmtPx(data.structure.last_low)}. Wait for structure to develop.`);
+      } else {
+        bullets.push(`MSS trigger — close below ${fmtPx(data.structure.last_low)}`);
+      }
     } else if (dir === 'BOTH') {
-      const hi = data.structure && data.structure.last_high;
-      const lo = data.structure && data.structure.last_low;
-      bullets.push(`MSS trigger — close above ${fmtPx(hi)} (BUY) or below ${fmtPx(lo)} (SELL)`);
+      bullets.push('MSS trigger — awaiting direction');
     } else {
       bullets.push('MSS trigger — awaiting direction');
     }
@@ -889,6 +1408,8 @@ function buildWaitingFor(data) {
   else if (dir === 'SELL') title = 'WAITING FOR SELL';
   else if (dir === 'BOTH') title = 'WAITING FOR DIRECTION';
 
+  _waitingCache = { title, subtitle: tier, bullets, signature: _sig, ts: _now };
+
   return { title, subtitle: tier, bullets };
 }
 
@@ -919,37 +1440,82 @@ function updateSetupPanel(data) {
       html += `<div class="waiting-row">• ${b}</div>`;
     });
     html += '</div>';
+
+    html += '<div style="margin-top:12px; padding:10px 12px; background:rgba(0,212,230,0.08); border-left:3px solid var(--cyan); border-radius:4px; font-size:11px; color:#c8d0dc; line-height:1.5;">';
+    html += '<b style="color:var(--cyan);">📋 TRADE PLAN:</b> Wait for price to reach the Order Block. Once it is in the zone, wait for the MSS to fire, then take the trade with the specified SL and TP. Do not enter early.';
+    html += '</div>';
+
+    const preAgg = computePrePlan(data, 'aggressive');
+    if (preAgg) {
+      const obRange = preAgg.zoneLabel.includes('OB') ? `${preAgg.zoneLabel} (${preAgg.targetBottom.toFixed(2)} – ${preAgg.targetTop.toFixed(2)})` : preAgg.zoneLabel;
+      html += '<div style="margin-top:12px; padding:12px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.1); border-radius:8px; font-size:12px; color:#c8d0dc; line-height:1.6;">';
+      html += `<b style="color:var(--cyan);">WAITING FOR ${preAgg.direction}</b><br>`;
+      html += `Price should pull back to <b>${obRange}</b> (${preAgg.inZone ? 'currently in zone' : 'not yet in zone'}).<br>`;
+      html += `<b>Trade Plan:</b> ${preAgg.direction} when price gets to OB.<br>`;
+      html += `SL: <span style="color:var(--red);">${preAgg.sl.toFixed(2)}</span> | TP1: <span style="color:var(--green);">${preAgg.tp1.toFixed(2)}</span> | TP2: <span style="color:var(--green);">${preAgg.tp2.toFixed(2)}</span><br>`;
+      html += `<b style="color:var(--gold);">⚠️ Wait for MSS confirmation.</b>`;
+      html += '</div>';
+    }
+
+    const forcedChase = computeMomentumChase(data, 'aggressive');
+    if (forcedChase) {
+        html += '<div class="planned-stack" style="margin-top:12px;"><div style="font-size:10px; color: #ef4444; margin-bottom: 4px; font-family:var(--font-cyber);">🚨 FORCED IMMEDIATE MSS CHASE (HIGH RISK)</div>';
+        html += renderPlannedBox(forcedChase, 'aggressive', true);
+        html += '</div>';
+    }
+
+    const obAgg = computeOBPullback(data, 'aggressive');
+    const obCon = computeOBPullback(data, 'conservative');
+
+    if (obAgg || obCon) {
+      html += '<div class="planned-stack" style="margin-top:12px;"><div style="font-size:10px; color: #60a5fa; margin-bottom: 4px; font-family:var(--font-cyber);">🎯 OB PULLBACK (Higher Probability)</div>';
+      if (obAgg) html += renderPlannedBox(obAgg, 'aggressive', false);
+      if (obCon) html += renderPlannedBox(obCon, 'conservative', false);
+      html += '</div>';
+    }
+
     html += '<div class="setup-hint">The scanner fires only when all conditions align. This is intentional.</div>';
     body.innerHTML = html;
     return;
   }
 
-  const isBuy = pick.direction === 'BUY';
+  const engineKey = `engine|${pick.direction}|${pick.zone_type || ''}|${pick.entry.toFixed(3)}`;
+  const now = Date.now();
+  let engineSetup = pick;
+
+  if (_lastEngineSetup && _lastEngineSetup.key === engineKey && (now - _lastEngineSetupTs) < PLAN_LOCK_MS) {
+    engineSetup = _lastEngineSetup.setup;
+  } else {
+    _lastEngineSetup = { key: engineKey, setup: pick };
+    _lastEngineSetupTs = now;
+  }
+
+  const isBuy = engineSetup.direction === 'BUY';
   panel.className = 'setup-panel ' + (isBuy ? 'buy' : 'sell');
-  dirEl.textContent = (isBuy ? '▲ BUY' : '▼ SELL') + ' · ' + pick.confidence;
-  rrEl.textContent = 'R:R 1 : ' + pick.rr.toFixed(2);
+  dirEl.textContent = (isBuy ? '▲ BUY' : '▼ SELL') + ' · ' + engineSetup.confidence;
+  rrEl.textContent = 'R:R 1 : ' + engineSetup.rr.toFixed(2);
 
   const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);
 
   let html = '';
   html += '<div class="setup-prices">';
-  html += `<div><div class="lbl">ENTRY</div><span>${px(pick.entry)}</span></div>`;
-  html += `<div><div class="lbl">SL</div><span style="color:var(--red);">${px(pick.sl)}</span></div>`;
-  html += `<div><div class="lbl">TP1</div><span style="color:var(--green);">${px(pick.tp1)}</span></div>`;
-  html += `<div><div class="lbl">TP2</div><span style="color:var(--green);">${px(pick.tp2)}</span></div>`;
+  html += `<div><div class="lbl">ENTRY</div><span>${px(engineSetup.entry)}</span></div>`;
+  html += `<div><div class="lbl">SL</div><span style="color:var(--red);">${px(engineSetup.sl)}</span></div>`;
+  html += `<div><div class="lbl">TP1</div><span style="color:var(--green);">${px(engineSetup.tp1)}</span></div>`;
+  html += `<div><div class="lbl">TP2</div><span style="color:var(--green);">${px(engineSetup.tp2)}</span></div>`;
   html += '</div>';
 
   html += '<div class="checklist">';
-  (pick.checklist || []).forEach(c => {
+  (engineSetup.checklist || []).forEach(c => {
     const cls = c.pass ? 'pass' : 'fail';
     const ic = c.pass ? '✅' : '❌';
     html += `<div class="checklist-row ${cls}"><span class="ic">${ic}</span><span class="lbl">${c.label}<div class="detail">${c.detail}</div></span></div>`;
   });
   html += '</div>';
 
-  if (pick.confidence === 'LOW') {
+  if (engineSetup.confidence === 'LOW') {
     html += '<div class="setup-hint">⚠️ LOW confidence — do not trade. Wait for more conditions to align.</div>';
-  } else if (pick.confidence === 'MEDIUM') {
+  } else if (engineSetup.confidence === 'MEDIUM') {
     html += '<div class="setup-hint">Trade at reduced size (0.5% risk max). Log the result.</div>';
   } else {
     html += '<div class="setup-hint">Full setup. Still only 40-50% win rate — manage risk.</div>';
@@ -1002,33 +1568,63 @@ function renderData(data, isRefresh) {
   if (!data || data.error) return;
   currentData = data;
 
-  const formattedCandles = data.candles.map(c => ({
-    time: toChartTime(c.time),
-    open: c.open, high: c.high, low: c.low, close: c.close
-  }));
+  const nowSec = Math.floor(Date.now() / 1000);
+  const formattedCandles = [];
+
+  (data.candles || []).forEach(c => {
+    if (!c) return;
+    const t = typeof c.time === 'number' ? c.time : 0;
+    if (t <= 0 || t > nowSec + 60) return;              
+    const o = Number(c.open);
+    const h = Number(c.high);
+    const l = Number(c.low);
+    const cl = Number(c.close);
+    if (!isFinite(o) || !isFinite(h) || !isFinite(l) || !isFinite(cl)) return;
+    if (o <= 0 || h <= 0 || l <= 0 || cl <= 0) return; 
+    if (h < l) return;                                   
+    formattedCandles.push({
+      time: toChartTime(t),
+      open: o, high: h, low: l, close: cl,
+      _rawTime: t
+    });
+  });
+
+  if (formattedCandles.length === 0) return;
 
   const seen = new Set();
   const unique = [];
   formattedCandles.forEach(c => {
-    const key = JSON.stringify(c.time);
-    if (!seen.has(key)) { seen.add(key); unique.push(c); }
+    if (seen.has(c._rawTime)) return;
+    seen.add(c._rawTime);
+    unique.push(c);
   });
 
-  if (!isRefresh) {
-    // Initial page load — full replace
-    series.setData(unique);
-  } else if (unique.length > 0) {
-    // Refresh — only update the last candle (seamless, no flicker)
-    const last = unique[unique.length - 1];
+  unique.sort((a, b) => a._rawTime - b._rawTime);
+
+  const chartCandles = unique.map(c => ({
+    time: c.time,
+    open: c.open,
+    high: c.high,
+    low: c.low,
+    close: c.close
+  }));
+
+  let savedTimeRange = null;
+  if (isRefresh) {
+    try { savedTimeRange = chart.timeScale().getVisibleLogicalRange(); } catch(e) {}
+  }
+
+  series.setData(chartCandles);
+
+  if (savedTimeRange) {
     try {
-      series.update(last);
-    } catch (e) {
-      series.setData(unique);
-    }
+      chart.timeScale().setVisibleLogicalRange(savedTimeRange);
+    } catch(e) {}
   }
 
   updateMSSPanel(data.mss);
   updateBiasPanel(data.bias);
+  updateSMTPanel(data);
   updateSetupPanel(data);
 
   const src = data.data_source || '';
@@ -1054,12 +1650,15 @@ function renderData(data, isRefresh) {
 
   checkAlert(data);
 
-  // Only redraw zones if the zone data actually changed
   const newSig = zoneSignature(data);
   if (!isRefresh || newSig !== lastZoneSig) {
     lastZoneSig = newSig;
-    setTimeout(() => drawZones(data), isRefresh ? 60 : 200);
+    requestAnimationFrame(() => drawZones(data));
+    setTimeout(() => drawZones(data), 300);
+    setTimeout(() => drawZones(data), 900);
   }
+
+  checkTP1Alert(data);
 }
 
 function checkAlert(data) {
@@ -1099,8 +1698,9 @@ window.addEventListener('load', () => {
 
     setTimeout(() => {
       try { chart.timeScale().fitContent(); } catch(e) {}
-      setTimeout(() => { if (currentData) drawZones(currentData); }, 400);
-    }, 200);
+      setTimeout(() => { if (currentData) drawZones(currentData); }, 500);
+      setTimeout(() => { if (currentData) drawZones(currentData); }, 1200);
+    }, 300);
 
     let refreshCountdown = 30;
     const statusEl = document.getElementById('refreshStatus');

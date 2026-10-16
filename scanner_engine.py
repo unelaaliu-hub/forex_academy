@@ -1,6 +1,7 @@
 """
 Live Chart Scanner — OANDA with yfinance fallback
 Adds: Sweep detection, PDH/PDL, Session H/L, Displacement, Dealing Range
+Adds: SMT Divergence, OTE Levels, MSS proximity filter
 """
 import os
 import sys
@@ -309,34 +310,54 @@ def detect_structure(df):
     }
 
 
-def detect_mss(df, structure):
+def detect_mss(df, structure, timeframe="15m"):
+    """
+    Detect Market Structure Shift.
+    Added proximity filter: the trigger level must be within 1.5 ATR of
+    the current price. Prevents firing on old swing highs/lows in ranging markets.
+    """
     sh = structure["swing_highs"]
     sl = structure["swing_lows"]
     if not sh or not sl:
         return None
 
     last_close = safe_float(df["close"].values[-1])
+    atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
+    if atr <= 0:
+        return None
+
+    # Proximity filter: trigger must be within 1.5 ATR of current price
+    max_trigger_distance = atr * 1.5
+
     last_high = sh[-1]
-    prev_high_price = structure.get("prev_high")
     last_low = sl[-1]
+    prev_high_price = structure.get("prev_high")
     prev_low_price = structure.get("prev_low")
 
     mss = None
 
     if last_low["index"] > last_high["index"]:
-        if last_close > last_high["price"]:
-            mss = {"type": "MSS_BULL", "level": safe_float(last_high["price"]),
-                   "description": f"Price closed above swing high at {last_high['price']:.2f} — bullish reversal confirmed"}
-        elif prev_high_price and last_close > prev_high_price:
-            mss = {"type": "MSS_BULL", "level": safe_float(prev_high_price),
-                   "description": f"Price closed above prior swing high at {prev_high_price:.2f} — early bullish shift"}
+        # Last event was a low — look for bullish shift
+        target_high = safe_float(last_high["price"])
+        if last_close > target_high:
+            mss = {"type": "MSS_BULL", "level": target_high,
+                   "description": f"Price closed above swing high at {target_high:.2f} — bullish reversal confirmed"}
+        elif prev_high_price:
+            distance = abs(prev_high_price - last_close)
+            if last_close > prev_high_price and distance <= max_trigger_distance:
+                mss = {"type": "MSS_BULL", "level": safe_float(prev_high_price),
+                       "description": f"Price closed above prior swing high at {prev_high_price:.2f} — early bullish shift"}
     elif last_high["index"] > last_low["index"]:
-        if last_close < last_low["price"]:
-            mss = {"type": "MSS_BEAR", "level": safe_float(last_low["price"]),
-                   "description": f"Price closed below swing low at {last_low['price']:.2f} — bearish reversal confirmed"}
-        elif prev_low_price and last_close < prev_low_price:
-            mss = {"type": "MSS_BEAR", "level": safe_float(prev_low_price),
-                   "description": f"Price closed below prior swing low at {prev_low_price:.2f} — early bearish shift"}
+        # Last event was a high — look for bearish shift
+        target_low = safe_float(last_low["price"])
+        if last_close < target_low:
+            mss = {"type": "MSS_BEAR", "level": target_low,
+                   "description": f"Price closed below swing low at {target_low:.2f} — bearish reversal confirmed"}
+        elif prev_low_price:
+            distance = abs(last_close - prev_low_price)
+            if last_close < prev_low_price and distance <= max_trigger_distance:
+                mss = {"type": "MSS_BEAR", "level": safe_float(prev_low_price),
+                       "description": f"Price closed below prior swing low at {prev_low_price:.2f} — early bearish shift"}
 
     return mss
 
@@ -417,11 +438,6 @@ def get_previous_day_hl(symbol):
 
 
 def get_session_ranges(df, symbol="", timeframe="15m"):
-    """
-    Today's session ranges (Asia / London / NY) in UTC.
-    Returns dict: { "ASIA": {high, low, start, end, ongoing}, ... }
-    Only for 15m and 1h (not meaningful on higher TFs).
-    """
     if symbol.upper() in CRYPTO_SYMBOLS:
         return {}
     if timeframe in ("4h", "1d"):
@@ -478,11 +494,6 @@ def get_session_ranges(df, symbol="", timeframe="15m"):
 
 
 def compute_dealing_range(df, structure, timeframe):
-    """
-    Find the most recent significant impulse leg — the dealing range.
-    Walks backward through swings, finds first alternating pair >= 3 ATR apart.
-    Falls back to last 100-candle H/L if no such pair exists.
-    """
     atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
     if atr <= 0:
         return None
@@ -872,7 +883,6 @@ def pick_tp_swing(structure, entry, direction):
 def build_checklist(direction, mss, bias, pd, killzone_ok, zone, rr, sweep=None):
     checklist = []
 
-    # HTF Bias
     bias_tier = bias.get("tier", "NEUTRAL") if bias else "UNKNOWN"
     d1 = bias.get("d1_trend") if bias else "RANGING"
     h4 = bias.get("h4_trend") if bias else "RANGING"
@@ -885,7 +895,6 @@ def build_checklist(direction, mss, bias, pd, killzone_ok, zone, rr, sweep=None)
     else:
         checklist.append({"label": "HTF Bias", "pass": False, "detail": f"{bias_tier} — {d1}/{h4}"})
 
-    # MSS
     mss_ok = bool(mss) and (
         (mss["type"] == "MSS_BULL" and direction == "BUY") or
         (mss["type"] == "MSS_BEAR" and direction == "SELL")
@@ -895,7 +904,6 @@ def build_checklist(direction, mss, bias, pd, killzone_ok, zone, rr, sweep=None)
         "detail": (mss["type"].replace("MSS_", "") if mss else "No MSS")
     })
 
-    # Sweep
     wanted_sweep = "SSL_SWEEP" if direction == "BUY" else "BSL_SWEEP"
     sweep_ok = bool(sweep) and sweep.get("type") == wanted_sweep
     sweep_label = "Sweep of SSL" if direction == "BUY" else "Sweep of BSL"
@@ -910,7 +918,6 @@ def build_checklist(direction, mss, bias, pd, killzone_ok, zone, rr, sweep=None)
         "label": sweep_label, "pass": sweep_ok, "detail": sweep_detail
     })
 
-    # PD
     want = "DISCOUNT" if direction == "BUY" else "PREMIUM"
     pd_ok = bool(pd) and pd["position"] == want
     checklist.append({
@@ -918,33 +925,99 @@ def build_checklist(direction, mss, bias, pd, killzone_ok, zone, rr, sweep=None)
         "detail": (pd["position"] if pd else "Unknown")
     })
 
-    # Killzone
     checklist.append({
         "label": "In Killzone", "pass": bool(killzone_ok),
         "detail": "Active" if killzone_ok else "Outside session"
     })
 
-    # Displacement (renamed from Zone Quality, stricter threshold)
     q = safe_float(zone.get("quality", 0))
     checklist.append({
         "label": "Displacement", "pass": q >= 2.0,
         "detail": f"{q:.1f}x avg body"
     })
 
-    # Freshness
     touches = safe_int(zone.get("touches", 0))
     checklist.append({
         "label": "OB Fresh", "pass": touches <= 1,
         "detail": "Untapped" if touches == 0 else f"Tapped {touches}x"
     })
 
-    # R:R
     checklist.append({
         "label": "R:R >= 2.0", "pass": rr >= 2.0,
         "detail": f"1 : {rr:.2f}"
     })
 
     return checklist
+
+
+def detect_smt_divergence(symbol, timeframe, structure):
+    if symbol.upper() != "XAUUSD":
+        return "N/A - Only for XAUUSD"
+
+    corr_symbol = "EURUSD"
+    corr_df, _ = fetch_data_cached(corr_symbol, timeframe, ttl=300)
+    if corr_df is None or len(corr_df) < 50:
+        return "NO DATA (EURUSD)"
+
+    corr_df = find_swings(corr_df, timeframe)
+    corr_structure = detect_structure(corr_df)
+
+    sh = structure.get("swing_highs", [])
+    sl = structure.get("swing_lows", [])
+    corr_sh = corr_structure.get("swing_highs", [])
+    corr_sl = corr_structure.get("swing_lows", [])
+
+    if len(sh) < 2 or len(sl) < 2 or len(corr_sh) < 2 or len(corr_sl) < 2:
+        return "INSUFFICIENT SWINGS"
+
+    if sh[-1]["price"] > sh[-2]["price"] and corr_sh[-1]["price"] < corr_sh[-2]["price"]:
+        return "BEARISH SMT (XAUUSD HH, EURUSD LH)"
+
+    if sl[-1]["price"] < sl[-2]["price"] and corr_sl[-1]["price"] > corr_sl[-2]["price"]:
+        return "BULLISH SMT (XAUUSD LL, EURUSD HL)"
+
+    return "NO DIVERGENCE DETECTED"
+
+
+def compute_ote_levels(structure):
+    sh = structure.get("swing_highs", [])
+    sl = structure.get("swing_lows", [])
+    if not sh or not sl:
+        return None
+
+    swings = []
+    for h in sh:
+        swings.append({"index": h["index"], "price": h["price"], "type": "H"})
+    for l in sl:
+        swings.append({"index": l["index"], "price": l["price"], "type": "L"})
+
+    if len(swings) < 2:
+        return None
+
+    swings.sort(key=lambda x: x["index"])
+
+    last_swing = swings[-1]
+    prev_swing = swings[-2]
+
+    if last_swing["type"] == prev_swing["type"]:
+        return None
+
+    range_val = abs(last_swing["price"] - prev_swing["price"])
+    if range_val == 0:
+        return None
+
+    if last_swing["type"] == "H":
+        ote_61_8 = last_swing["price"] - range_val * 0.618
+        ote_79_0 = last_swing["price"] - range_val * 0.79
+    else:
+        ote_61_8 = last_swing["price"] + range_val * 0.618
+        ote_79_0 = last_swing["price"] + range_val * 0.79
+
+    return {
+        "top": round(max(ote_61_8, ote_79_0), 4),
+        "bottom": round(min(ote_61_8, ote_79_0), 4),
+        "label": "OTE Zone (61.8% - 79.0%)"
+    }
 
 
 def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None, symbol="",
@@ -964,11 +1037,17 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
     if bias_tier == "CONFLICT":
         return None, None
 
-    if bias_tier == "NEUTRAL" and not mss:
+    if not mss:
         return None, None
 
-    allow_buy = bias["allow_buy"]
-    allow_sell = bias["allow_sell"]
+    if mss["type"] == "MSS_BULL":
+        allow_buy = True
+        allow_sell = False
+    elif mss["type"] == "MSS_BEAR":
+        allow_buy = False
+        allow_sell = True
+    else:
+        return None, None
 
     def build_setup(direction, zone, entry, sl, tp1, tp2):
         risk = abs(entry - sl)
@@ -977,8 +1056,10 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
         reward_1 = abs(tp1 - entry)
         rr = reward_1 / risk
 
-        if rr < 2.0:
-            return None
+        # --- SAFETY FILTER REMOVED (A/B TEST) ---
+        # if rr < 2.0:
+        #     return None
+        # ----------------------------------------
 
         if bias_tier == "NEUTRAL":
             mss_ok = mss and (
@@ -1152,7 +1233,7 @@ def analyze(symbol, timeframe):
 
     df = find_swings(df, timeframe)
     structure = detect_structure(df)
-    mss = detect_mss(df, structure)
+    mss = detect_mss(df, structure, timeframe)
     sweep = detect_recent_sweep(df, structure, lookback=40)
     pools = find_liquidity_pools(df, structure, timeframe)
     obs = find_order_blocks(df, timeframe)
@@ -1166,6 +1247,9 @@ def analyze(symbol, timeframe):
 
     killzone_ok = in_killzone(symbol)
     bias = get_bias(symbol)
+
+    smt_result = detect_smt_divergence(symbol, timeframe, structure)
+    ote_result = compute_ote_levels(structure)
 
     buy_setup, sell_setup = generate_scenarios(
         df, structure, obs, fvgs, pools, pd_zones, timeframe, mss,
@@ -1304,6 +1388,8 @@ def analyze(symbol, timeframe):
         "candles": candles,
         "swing_high_markers": sh_markers,
         "swing_low_markers": sl_markers,
+        "smt_divergence": smt_result,
+        "ote_levels": ote_result,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "data_source": used_source
     }
