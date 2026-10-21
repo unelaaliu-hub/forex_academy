@@ -24,12 +24,14 @@ OANDA_BASE_URL = "https://api-fxpractice.oanda.com"
 INSTRUMENT_MAP = {
     "XAUUSD": "XAU_USD", "EURUSD": "EUR_USD", "GBPUSD": "GBP_USD",
     "USDJPY": "USD_JPY", "AUDUSD": "AUD_USD", "BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD",
+    "NAS100": "NAS100_USD", "US30": "US30_USD", "JPN225": "JP225_USD",
 }
 GRANULARITY_MAP = {"15m": "M15", "1h": "H1", "4h": "H4", "1d": "D"}
 
 YF_FALLBACK = {
     "XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X", "AUDUSD": "AUDUSD=X", "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
+    "NAS100": "NQ=F", "US30": "YM=F", "JPN225": "^N225",
 }
 YF_PERIOD = {"15m": "60d", "1h": "180d", "4h": "365d", "1d": "5y"}
 
