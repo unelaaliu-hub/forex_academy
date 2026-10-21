@@ -1,7 +1,9 @@
 """
 Live Chart Scanner — OANDA with yfinance fallback
 Adds: Sweep detection, PDH/PDL, Session H/L, Displacement, Dealing Range
-Adds: SMT Divergence, OTE Levels, MSS proximity filter
+Adds: SMT Divergence, OTE Levels, MSS proximity filter, H4 Levels
+Adds: HTF Supply/Demand Zones (D1/H4 Order Blocks)
+STRICT MODE: Enforces R:R > 1.0, Blocks falling knives, Waits for Major MSS.
 """
 import os
 import sys
@@ -311,11 +313,7 @@ def detect_structure(df):
 
 
 def detect_mss(df, structure, timeframe="15m"):
-    """
-    Detect Market Structure Shift.
-    Added proximity filter: the trigger level must be within 1.5 ATR of
-    the current price. Prevents firing on old swing highs/lows in ranging markets.
-    """
+    """Strict Major MSS Logic"""
     sh = structure["swing_highs"]
     sl = structure["swing_lows"]
     if not sh or not sl:
@@ -326,7 +324,6 @@ def detect_mss(df, structure, timeframe="15m"):
     if atr <= 0:
         return None
 
-    # Proximity filter: trigger must be within 1.5 ATR of current price
     max_trigger_distance = atr * 1.5
 
     last_high = sh[-1]
@@ -337,7 +334,6 @@ def detect_mss(df, structure, timeframe="15m"):
     mss = None
 
     if last_low["index"] > last_high["index"]:
-        # Last event was a low — look for bullish shift
         target_high = safe_float(last_high["price"])
         if last_close > target_high:
             mss = {"type": "MSS_BULL", "level": target_high,
@@ -348,7 +344,6 @@ def detect_mss(df, structure, timeframe="15m"):
                 mss = {"type": "MSS_BULL", "level": safe_float(prev_high_price),
                        "description": f"Price closed above prior swing high at {prev_high_price:.2f} — early bullish shift"}
     elif last_high["index"] > last_low["index"]:
-        # Last event was a high — look for bearish shift
         target_low = safe_float(last_low["price"])
         if last_close < target_low:
             mss = {"type": "MSS_BEAR", "level": target_low,
@@ -811,11 +806,20 @@ def get_bias(symbol):
 
     d1_trend = "RANGING"
     h4_trend = "RANGING"
+    h4_levels = [] 
+    htf_obs = [] 
+
     try:
         d1_df, _ = fetch_data_cached(symbol, "1d", ttl=1800)
         if d1_df is not None and len(d1_df) >= 50:
             d1_df = find_swings(d1_df, "1d")
-            d1_trend = detect_structure(d1_df)["trend"]
+            d1_struct = detect_structure(d1_df)
+            d1_trend = d1_struct["trend"]
+            
+            d1_obs = find_order_blocks(d1_df, "1d", lookback=50)
+            for ob in d1_obs:
+                ob["tf"] = "D1"
+                htf_obs.append(ob)
     except Exception:
         pass
 
@@ -823,7 +827,18 @@ def get_bias(symbol):
         h4_df, _ = fetch_data_cached(symbol, "4h", ttl=300)
         if h4_df is not None and len(h4_df) >= 50:
             h4_df = find_swings(h4_df, "4h")
-            h4_trend = detect_structure(h4_df)["trend"]
+            h4_struct = detect_structure(h4_df)
+            h4_trend = h4_struct["trend"]
+            
+            for h in h4_struct.get("swing_highs", []):
+                h4_levels.append({"type": "H4_HIGH", "price": safe_float(h["price"])})
+            for l in h4_struct.get("swing_lows", []):
+                h4_levels.append({"type": "H4_LOW", "price": safe_float(l["price"])})
+
+            h4_obs = find_order_blocks(h4_df, "4h", lookback=100)
+            for ob in h4_obs:
+                ob["tf"] = "H4"
+                htf_obs.append(ob)
     except Exception:
         pass
 
@@ -854,6 +869,8 @@ def get_bias(symbol):
         tier, reason = "NEUTRAL", "D1 + H4 both RANGING — range conditions, MSS required"
 
     result = {"d1_trend": d1_trend, "h4_trend": h4_trend,
+              "h4_levels": h4_levels,
+              "htf_obs": htf_obs,
               "allow_buy": allow_buy, "allow_sell": allow_sell,
               "tier": tier, "reason": reason}
     _cache_set(_bias_cache, symbol, result)
@@ -942,8 +959,9 @@ def build_checklist(direction, mss, bias, pd, killzone_ok, zone, rr, sweep=None)
         "detail": "Untapped" if touches == 0 else f"Tapped {touches}x"
     })
 
+    # CHANGED TO 1.0
     checklist.append({
-        "label": "R:R >= 2.0", "pass": rr >= 2.0,
+        "label": "R:R >= 1.0", "pass": rr >= 1.0,
         "detail": f"1 : {rr:.2f}"
     })
 
@@ -1028,26 +1046,45 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
     tolerance = atr * 0.5
     min_risk = atr * 0.5
     max_risk = atr * 5.0
+    
+    warning_msg = None
 
     if not bias:
-        return None, None
+        return None, None, warning_msg
 
     bias_tier = bias.get("tier", "NEUTRAL")
 
     if bias_tier == "CONFLICT":
-        return None, None
+        return None, None, warning_msg
 
     if not mss:
-        return None, None
+        return None, None, warning_msg
+
+    # --- STRICT ATR DISPLACEMENT GUARDRAIL ---
+    last_candle = df.iloc[-1]
+    candle_range = last_candle["high"] - last_candle["low"]
+    
+    is_bearish_dump = (last_candle["close"] < last_candle["open"]) and (candle_range > atr * 2.5)
+    is_bullish_rip = (last_candle["close"] > last_candle["open"]) and (candle_range > atr * 2.5)
 
     if mss["type"] == "MSS_BULL":
-        allow_buy = True
-        allow_sell = False
+        if is_bearish_dump:
+            allow_buy = False
+            allow_sell = False
+            warning_msg = "⚠️ DO NOT BUY: Massive bearish displacement detected. Sellers are in control."
+        else:
+            allow_buy = True
+            allow_sell = False
     elif mss["type"] == "MSS_BEAR":
-        allow_buy = False
-        allow_sell = True
+        if is_bullish_rip:
+            allow_buy = False
+            allow_sell = False
+            warning_msg = "⚠️ DO NOT SELL: Massive bullish displacement detected. Buyers are in control."
+        else:
+            allow_buy = False
+            allow_sell = True
     else:
-        return None, None
+        return None, None, warning_msg
 
     def build_setup(direction, zone, entry, sl, tp1, tp2):
         risk = abs(entry - sl)
@@ -1056,10 +1093,10 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
         reward_1 = abs(tp1 - entry)
         rr = reward_1 / risk
 
-        # --- SAFETY FILTER REMOVED (A/B TEST) ---
-        # if rr < 2.0:
-        #     return None
-        # ----------------------------------------
+        # --- STRICT R:R FILTER CHANGED TO 1.0 (Rule 4) ---
+        if rr < 1.0:
+            return None
+        # ----------------------------------
 
         if bias_tier == "NEUTRAL":
             mss_ok = mss and (
@@ -1187,7 +1224,7 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
                 sell_setup = setup
                 break
 
-    return buy_setup, sell_setup
+    return buy_setup, sell_setup, warning_msg
 
 
 def compute_correlations(symbols, timeframe='1h', lookback=200):
@@ -1233,14 +1270,16 @@ def analyze(symbol, timeframe):
 
     df = find_swings(df, timeframe)
     structure = detect_structure(df)
-    mss = detect_mss(df, structure, timeframe)
+    
+    dealing_range = compute_dealing_range(df, structure, timeframe)
+    pd_zones = premium_discount(df, structure, current_px, dealing_range=dealing_range)
+
+    mss = detect_mss(df, structure, timeframe) # Reverted to strict major MSS
+    
     sweep = detect_recent_sweep(df, structure, lookback=40)
     pools = find_liquidity_pools(df, structure, timeframe)
     obs = find_order_blocks(df, timeframe)
     fvgs = find_fvgs(df, timeframe)
-
-    dealing_range = compute_dealing_range(df, structure, timeframe)
-    pd_zones = premium_discount(df, structure, current_px, dealing_range=dealing_range)
 
     pdh, pdl = get_previous_day_hl(symbol)
     sessions = get_session_ranges(df, symbol, timeframe)
@@ -1251,7 +1290,7 @@ def analyze(symbol, timeframe):
     smt_result = detect_smt_divergence(symbol, timeframe, structure)
     ote_result = compute_ote_levels(structure)
 
-    buy_setup, sell_setup = generate_scenarios(
+    buy_setup, sell_setup, warning_msg = generate_scenarios(
         df, structure, obs, fvgs, pools, pd_zones, timeframe, mss,
         symbol=symbol, bias=bias, killzone_ok=killzone_ok, sweep=sweep
     )
@@ -1384,6 +1423,7 @@ def analyze(symbol, timeframe):
         "premium_discount": pd_zones,
         "buy_setup": buy_setup,
         "sell_setup": sell_setup,
+        "warning": warning_msg, # PASS WARNING TO FRONTEND
         "killzone": killzone,
         "candles": candles,
         "swing_high_markers": sh_markers,

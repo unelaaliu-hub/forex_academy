@@ -73,6 +73,26 @@
 
   .warning-banner { background:rgba(230,184,0,0.08); border:1px solid rgba(230,184,0,0.3); border-radius:8px; padding:12px 16px; margin-bottom:20px; font-size:13px; color:#c8d0dc; line-height:1.5; }
 
+  .displacement-banner {
+    background: rgba(220,38,38,0.15);
+    border: 2px solid #ef4444;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+    display: none;
+    align-items: flex-start;
+    gap: 12px;
+    box-shadow: 0 0 25px rgba(239,68,68,0.5);
+    animation: pulseWarning 2s infinite;
+  }
+  @keyframes pulseWarning {
+    0% { box-shadow: 0 0 15px rgba(239,68,68,0.4); }
+    50% { box-shadow: 0 0 30px rgba(239,68,68,0.8); }
+    100% { box-shadow: 0 0 15px rgba(239,68,68,0.4); }
+  }
+  .displacement-banner .alert-icon { font-size: 24px; line-height: 1; }
+  .displacement-banner .alert-text { color: #fca5a5; font-family: var(--font-cyber); font-size: 14px; letter-spacing: 1px; line-height: 1.5; font-weight: 700; }
+
   .toggle-bar { display:flex; gap:14px; flex-wrap:wrap; margin-bottom:14px; padding:12px 16px; background:#0a0c12; border:1px solid rgba(255,255,255,0.06); border-radius:10px; align-items:center; }
   .toggle-item { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); cursor:pointer; user-select:none; padding:4px 4px; border-radius:4px; letter-spacing:0.5px; }
   .toggle-item input { accent-color:var(--cyan); cursor:pointer; }
@@ -153,10 +173,10 @@
   <div>
     <div style="font-size:11px; color:var(--muted); letter-spacing:3px; margin-bottom:4px;">LIVE CHART SCANNER</div>
     <h1 class="symbol-title" id="symbolTitle">{{ data.symbol | default(current_symbol) }}</h1>
-    <div class="price-big" id="priceDisplay">—</div>
+    <div class="price-big" id="priceDisplay">...</div>
     <div class="refresh-info">
       <span class="dot" id="statusDot"></span>
-      <span id="refreshStatus">Live · Auto-refresh: 30s</span>
+      <span id="refreshStatus">Live | Auto-refresh: 30s</span>
     </div>
     {% if data.data_source %}
     <div class="data-source">📡 Source: {{ data.data_source }}</div>
@@ -200,6 +220,9 @@
 <div class="layout">
   <div>
     <div class="toggle-bar">
+      <label class="toggle-item active" id="toggleHTFLabel">
+        <input type="checkbox" id="toggleHTF" checked onchange="toggleLayer('HTF', this)"> HTF Supply/Demand
+      </label>
       <label class="toggle-item active" id="toggleOBLabel">
         <input type="checkbox" id="toggleOB" checked onchange="toggleLayer('OB', this)"> Order Blocks
       </label>
@@ -223,6 +246,9 @@
       </label>
       <label class="toggle-item active" id="toggleSwingLabel">
         <input type="checkbox" id="toggleSwing" checked onchange="toggleLayer('SWING', this)"> Swing Markers
+      </label>
+      <label class="toggle-item active" id="toggleH4Label">
+        <input type="checkbox" id="toggleH4" checked onchange="toggleLayer('H4', this)"> H4 Bias Overlay
       </label>
       <label class="toggle-item" id="toggleCounterTrendLabel">
         <input type="checkbox" id="toggleCounterTrend" onchange="toggleCounterTrend(this)"> Show Counter-Trend
@@ -261,6 +287,11 @@
     </div>
     {% endif %}
 
+    <div id="displacementWarning" class="displacement-banner">
+      <div class="alert-icon">🛑</div>
+      <div class="alert-text" id="displacementText"></div>
+    </div>
+
     <div class="glass panel">
       <div class="panel-title">⚖️ SMT Divergence</div>
       <div id="smtStatus" style="font-size:13px; color:var(--muted);">
@@ -275,14 +306,14 @@
       </div>
       <div id="setupBody">
         <div style="font-size:12px; color:var(--muted); line-height:1.5;">
-          Loading market state…
+          Loading market state...
         </div>
       </div>
     </div>
 
     <div id="mssPanel" class="mss-panel mss-none">
       <div class="mss-header">
-        <div class="mss-icon" id="mssIcon">⏸</div>
+        <div class="mss-icon" id="mssIcon">⏳</div>
         <div class="mss-title" id="mssTitle">NO MSS DETECTED</div>
       </div>
       <div class="mss-desc" id="mssDesc">
@@ -291,7 +322,7 @@
     </div>
 
     <div class="glass panel">
-      <div class="panel-title">🕐 Session</div>
+      <div class="panel-title">🕒 Session</div>
       <div style="font-size:14px; color:#e6ecf5;" id="killzoneDisplay">{{ data.killzone }}</div>
     </div>
 
@@ -324,7 +355,7 @@
     </div>
 
     <div class="glass panel">
-      <div class="panel-title">🗺️ Legend</div>
+      <div class="panel-title">📋 Legend</div>
       <div class="legend-grid">
         <div class="legend-item"><div class="legend-swatch" style="background:rgba(34,197,94,0.35);border:1px solid rgba(34,197,94,0.8);"></div>Bullish OB</div>
         <div class="legend-item"><div class="legend-swatch" style="background:rgba(220,38,38,0.35);border:1px solid rgba(220,38,38,0.8);"></div>Bearish OB</div>
@@ -377,7 +408,7 @@ let lastOandaPrice = null;
 let isRefreshing = false;
 let rangeRedrawPending = false;
 
-const show = { OB: true, FVG: true, POOL: true, PDHL: true, SESSION: true, OTE: true, SETUP: false, SWING: true };
+const show = { HTF: true, OB: true, FVG: true, POOL: true, PDHL: true, SESSION: true, OTE: true, SETUP: false, SWING: true, H4: true };
 let showCounterTrend = false;
 const MAX_SWINGS_PER_SIDE = 5;
 let lastZoneSig = null;
@@ -540,6 +571,7 @@ function toY(price) {
 function toggleLayer(key, checkbox) {
   show[key] = checkbox.checked;
   const label = document.getElementById(
+    key === 'HTF'     ? 'toggleHTFLabel'     :
     key === 'OB'      ? 'toggleOBLabel'      :
     key === 'FVG'     ? 'toggleFVGLabel'     :
     key === 'POOL'    ? 'togglePoolLabel'    :
@@ -547,6 +579,7 @@ function toggleLayer(key, checkbox) {
     key === 'SESSION' ? 'toggleSessionLabel' :
     key === 'OTE'     ? 'toggleOTELabel'     :
     key === 'SETUP'   ? 'toggleSetupLabel'   :
+    key === 'H4'      ? 'toggleH4Label'      :
                         'toggleSwingLabel'
   );
   if (label) {
@@ -562,6 +595,46 @@ function toggleCounterTrend(checkbox) {
   if (checkbox.checked) label.classList.add('active');
   else label.classList.remove('active');
   if (currentData) renderData(currentData, true);
+}
+
+function drawHTFZones(data) {
+  if (!show.HTF || !data.bias || !data.bias.htf_obs) return;
+  const w = svgEl.clientWidth || 800;
+
+  data.bias.htf_obs.forEach(z => {
+    const x2 = toX(lastCandleUnix);
+    if (x2 === null) return;
+
+    const y1 = toY(z.top), y2 = toY(z.bottom);
+    if (y1 === null || y2 === null) return;
+
+    const isBull = z.type === 'OB_BULL';
+    const color = isBull ? 'rgba(34,197,94,0.04)' : 'rgba(220,38,38,0.04)';
+    const strokeColor = isBull ? 'rgba(34,197,94,0.25)' : 'rgba(220,38,38,0.25)';
+
+    const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    r.setAttribute('x', 0); 
+    r.setAttribute('y', Math.min(y1, y2));
+    r.setAttribute('width', x2);
+    r.setAttribute('height', Math.abs(y2 - y1));
+    r.setAttribute('fill', color);
+    r.setAttribute('stroke', strokeColor);
+    r.setAttribute('stroke-width', '2');
+    r.setAttribute('stroke-dasharray', '10 5');
+    zoneLayer.appendChild(r);
+
+    if (Math.abs(y2 - y1) > 15) {
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', 10);
+        label.setAttribute('y', Math.min(y1, y2) + 15);
+        label.setAttribute('fill', strokeColor);
+        label.setAttribute('font-family', 'Orbitron, sans-serif');
+        label.setAttribute('font-size', '10');
+        label.setAttribute('font-weight', '700');
+        label.textContent = `${z.tf} ${isBull ? 'Demand' : 'Supply'}`;
+        zoneLayer.appendChild(label);
+    }
+  });
 }
 
 function drawSwingMarkers() {
@@ -763,6 +836,73 @@ function drawOTELevels(data) {
   drawOteLine(ote2, 'OTE 79.0%');
 }
 
+function drawH4Levels(data) {
+  if (!show.H4 || !data.bias) return;
+  
+  const w = svgEl.clientWidth || 800;
+  const h = svgEl.clientHeight || 620;
+  const h4Trend = data.bias.h4_trend;
+
+  if (h4Trend === 'RANGING') return;
+
+  const isBull = h4Trend === 'BULLISH';
+  const rectColor = isBull ? 'rgba(34,197,94,0.04)' : 'rgba(220,38,38,0.04)';
+  const textColor = isBull ? 'rgba(34,197,94,0.15)' : 'rgba(220,38,38,0.15)';
+  const text = `H4 ${h4Trend} BIAS`;
+
+  const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  rect.setAttribute('x', 0);
+  rect.setAttribute('y', 0);
+  rect.setAttribute('width', w);
+  rect.setAttribute('height', h);
+  rect.setAttribute('fill', rectColor);
+  zoneLayer.appendChild(rect);
+
+  const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  txt.setAttribute('x', w / 2);
+  txt.setAttribute('y', 80);
+  txt.setAttribute('fill', textColor);
+  txt.setAttribute('font-family', 'Orbitron, sans-serif');
+  txt.setAttribute('font-size', '36');
+  txt.setAttribute('font-weight', '900');
+  txt.setAttribute('text-anchor', 'middle');
+  txt.setAttribute('letter-spacing', '8px');
+  txt.textContent = text;
+  zoneLayer.appendChild(txt);
+
+  if (data.bias.h4_levels && data.bias.h4_levels.length > 0) {
+      data.bias.h4_levels.forEach(lvl => {
+          const y = toY(lvl.price);
+          if (y === null) return;
+          const color = lvl.type === 'H4_HIGH' ? '#ef5350' : '#26a69a';
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          line.setAttribute('x1', w / 2);
+          line.setAttribute('x2', w);
+          line.setAttribute('y1', y);
+          line.setAttribute('y2', y);
+          line.setAttribute('stroke', color);
+          line.setAttribute('stroke-width', '1.5');
+          line.setAttribute('stroke-dasharray', '8 4');
+          line.setAttribute('opacity', '0.6');
+          zoneLayer.appendChild(line);
+
+          const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          t.setAttribute('x', w - 150);
+          t.setAttribute('y', y - 3);
+          t.setAttribute('fill', color);
+          t.setAttribute('font-family', 'Orbitron, sans-serif');
+          t.setAttribute('font-size', '9');
+          t.setAttribute('font-weight', '700');
+          t.setAttribute('opacity', '0.8');
+          t.setAttribute('paint-order', 'stroke');
+          t.setAttribute('stroke', '#000');
+          t.setAttribute('stroke-width', '2');
+          t.textContent = lvl.type.replace('_', ' ');
+          zoneLayer.appendChild(t);
+      });
+  }
+}
+
 function drawSetupLevels(data) {
   if (!show.SETUP) return;
   const setup = data.buy_setup || data.sell_setup;
@@ -867,6 +1007,9 @@ function drawZones(data) {
   lastCandleUnix = data.candles[data.candles.length - 1].time;
   firstCandleUnix = data.candles[0].time;
 
+  drawH4Levels(data);
+  drawHTFZones(data); 
+
   drawPDHLines(data);
   drawSessionLevels(data);
   drawOTELevels(data);
@@ -937,7 +1080,7 @@ function updateMSSPanel(mss) {
 
   if (!mss) {
     panel.className = 'mss-panel mss-none';
-    icon.textContent = '⏸';
+    icon.textContent = '⏳';
     title.textContent = 'NO MSS DETECTED';
     desc.innerHTML = 'Market has not reversed structure. Wait for a sweep + break pattern before taking trades.';
     return;
@@ -1135,6 +1278,10 @@ function buildSetupResult(data, mode, target, dir, isChase, isPrePlan) {
   const rr1 = reward1 / risk;
   const rr2 = reward2 / risk;
 
+  // --- STRICT R:R FILTER FOR UI PLANNED BOXES (CHANGED TO 1.0) ---
+  if (rr1 < 1.0) return null;
+  // --------------------------------------------------------------
+
   if (!showCounterTrend) {
     if (data.premium_discount && data.premium_discount.position) {
       const pos = data.premium_discount.position.toUpperCase();
@@ -1255,13 +1402,13 @@ function computePrePlan(data, mode) {
 function renderPlannedBox(p, mode, forceChase) {
   const isBuy = p.direction === 'BUY';
   const dirColor = isBuy ? 'var(--green)' : 'var(--red)';
-  const dirLabel = isBuy ? '▲ BUY' : '▼ SELL';
+  const dirLabel = isBuy ? '▼ BUY' : '▼ SELL';
   const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);
   const distTxt = p.inZone
     ? '<span style="color:var(--green); font-weight:600;">✅ PRICE IN ZONE</span>'
     : `<span style="color:var(--muted);">${p.distanceAtr.toFixed(1)} ATR from zone</span>`;
 
-  const rrColor = p.rr1 >= 2 ? 'var(--green)' : (p.rr1 >= 1.5 ? 'var(--gold)' : 'var(--red)');
+  const rrColor = p.rr1 >= 2 ? 'var(--green)' : (p.rr1 >= 1.0 ? 'var(--gold)' : 'var(--red)');
 
   const isChase = forceChase || (p.zoneLabel && p.zoneLabel.includes('MOMENTUM'));
   const boxClass = mode === 'aggressive' ? 'aggressive' : 'conservative';
@@ -1280,8 +1427,8 @@ function renderPlannedBox(p, mode, forceChase) {
   html += `<div class="planned-cell"><div class="lbl">TP1</div><div class="val" style="color:var(--green);">${px(p.tp1)}</div><div class="planned-basis">${p.tp1Basis}</div></div>`;
   html += `<div class="planned-cell"><div class="lbl">TP2</div><div class="val" style="color:var(--green);">${px(p.tp2)}</div><div class="planned-basis">${p.tp2Basis}</div></div>`;
   html += '</div>';
-  html += `<div class="planned-rr">R:R TP1 = 1 : <span style="color:${rrColor};">${p.rr1.toFixed(2)}</span> · TP2 = 1 : ${p.rr2.toFixed(2)}</div>`;
-  if (p.rr1 < 1.5) {
+  html += `<div class="planned-rr">R:R TP1 = 1 : <span style="color:${rrColor};">${p.rr1.toFixed(2)}</span> | TP2 = 1 : ${p.rr2.toFixed(2)}</div>`;
+  if (p.rr1 < 1.0) {
     html += '<div style="font-size:11px; color:var(--red); margin-top:6px;">⚠️ Poor R:R on TP1 — skip this entry</div>';
   }
   html += '</div>';
@@ -1382,7 +1529,7 @@ function buildWaitingFor(data) {
       bullets.push(`Price is at ${nearest.label} — ✅ in zone`);
     } else {
       const verb = (dir === 'BUY') ? 'pullback into' : (dir === 'SELL') ? 'retrace up into' : 'return to';
-      bullets.push(`Price to ${verb} ${nearest.label} (${fmtPx(nearest.bottom)} – ${fmtPx(nearest.top)})`);
+      bullets.push(`Price to ${verb} ${nearest.label} (${fmtPx(nearest.bottom)} — ${fmtPx(nearest.top)})`);
     }
   } else {
     bullets.push('A fresh zone in the trade direction');
@@ -1437,7 +1584,7 @@ function updateSetupPanel(data) {
 
     let html = '<div class="waiting-list">';
     w.bullets.forEach(b => {
-      html += `<div class="waiting-row">• ${b}</div>`;
+      html += `<div class="waiting-row">- ${b}</div>`;
     });
     html += '</div>';
 
@@ -1447,7 +1594,7 @@ function updateSetupPanel(data) {
 
     const preAgg = computePrePlan(data, 'aggressive');
     if (preAgg) {
-      const obRange = preAgg.zoneLabel.includes('OB') ? `${preAgg.zoneLabel} (${preAgg.targetBottom.toFixed(2)} – ${preAgg.targetTop.toFixed(2)})` : preAgg.zoneLabel;
+      const obRange = preAgg.zoneLabel.includes('OB') ? `${preAgg.zoneLabel} (${preAgg.targetBottom.toFixed(2)} — ${preAgg.targetTop.toFixed(2)})` : preAgg.zoneLabel;
       html += '<div style="margin-top:12px; padding:12px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.1); border-radius:8px; font-size:12px; color:#c8d0dc; line-height:1.6;">';
       html += `<b style="color:var(--cyan);">WAITING FOR ${preAgg.direction}</b><br>`;
       html += `Price should pull back to <b>${obRange}</b> (${preAgg.inZone ? 'currently in zone' : 'not yet in zone'}).<br>`;
@@ -1492,7 +1639,7 @@ function updateSetupPanel(data) {
 
   const isBuy = engineSetup.direction === 'BUY';
   panel.className = 'setup-panel ' + (isBuy ? 'buy' : 'sell');
-  dirEl.textContent = (isBuy ? '▲ BUY' : '▼ SELL') + ' · ' + engineSetup.confidence;
+  dirEl.textContent = (isBuy ? '▼ BUY' : '▼ SELL') + ' | ' + engineSetup.confidence;
   rrEl.textContent = 'R:R 1 : ' + engineSetup.rr.toFixed(2);
 
   const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);
@@ -1627,6 +1774,21 @@ function renderData(data, isRefresh) {
   updateSMTPanel(data);
   updateSetupPanel(data);
 
+  // --- DISPLACEMENT WARNING HANDLING ---
+  const dispWarn = document.getElementById('displacementWarning');
+  const dispText = document.getElementById('displacementText');
+  const setupPanel = document.getElementById('setupPanel');
+
+  if (data.warning) {
+      dispWarn.style.display = 'flex';
+      dispText.innerHTML = `${data.warning}<br><span style="font-size:11px; color:#ddd; font-family:'Trebuchet MS', sans-serif; letter-spacing:0;">Signal blocked. Wait for price to settle.</span>`;
+      if (setupPanel) setupPanel.style.display = 'none'; 
+  } else {
+      dispWarn.style.display = 'none';
+      if (setupPanel) setupPanel.style.display = 'block'; 
+  }
+  // -------------------------------------
+
   const src = data.data_source || '';
   const priceEl = document.getElementById('priceDisplay');
 
@@ -1665,6 +1827,12 @@ function checkAlert(data) {
   const banner = document.getElementById('alertBanner');
   const text = document.getElementById('alertText');
   const sub = document.getElementById('alertSub');
+  
+  if (data.warning) {
+      banner.classList.remove('show');
+      return;
+  }
+
   const highs = [];
   if (data.buy_setup && data.buy_setup.confidence === 'HIGH') highs.push('BUY');
   if (data.sell_setup && data.sell_setup.confidence === 'HIGH') highs.push('SELL');
@@ -1673,7 +1841,7 @@ function checkAlert(data) {
     const setups = [];
     if (highs.includes('BUY')) setups.push(`BUY R:R 1:${data.buy_setup.rr.toFixed(2)}`);
     if (highs.includes('SELL')) setups.push(`SELL R:R 1:${data.sell_setup.rr.toFixed(2)}`);
-    sub.textContent = setups.join(' · ');
+    sub.textContent = setups.join(' | ');
     banner.classList.add('show');
   } else {
     banner.classList.remove('show');
@@ -1708,7 +1876,7 @@ window.addEventListener('load', () => {
     setInterval(() => {
       refreshCountdown--;
       if (refreshCountdown > 0) {
-        statusEl.textContent = `Live · Next refresh in ${refreshCountdown}s`;
+        statusEl.textContent = `Live | Next refresh in ${refreshCountdown}s`;
         return;
       }
 
@@ -1734,7 +1902,7 @@ window.addEventListener('load', () => {
         .then(newData => {
           if (newData && !newData.error) {
             renderData(newData, true);
-            statusEl.textContent = 'Live · Auto-refresh: 30s';
+            statusEl.textContent = 'Live | Auto-refresh: 30s';
           } else {
             statusEl.textContent = 'Refresh error';
           }
