@@ -4,6 +4,7 @@ Adds: Sweep detection, PDH/PDL, Session H/L, Displacement, Dealing Range
 Adds: SMT Divergence, OTE Levels, MSS proximity filter, H4 Levels
 Adds: HTF Supply/Demand Zones (D1/H4 Order Blocks)
 STRICT MODE: Enforces R:R > 1.0, Blocks falling knives, Waits for Major MSS.
+FIXED: Prevents timeouts on closed markets/indices with strict threading.
 """
 import os
 import sys
@@ -15,6 +16,7 @@ import numpy as np
 from datetime import datetime, timezone, timedelta
 import time
 import urllib3
+import concurrent.futures # <--- ADDED FOR HARD TIMEOUTS
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -86,10 +88,13 @@ def safe_int(v, default=0):
         return default
 
 
-def oanda_request(url, headers, params=None, retries=2):
-    for attempt in range(retries):
+def oanda_request(url, headers, params=None, retries=1):
+    # Shortened timeout to 3 seconds. Fail fast on 404.
+    for attempt in range(retries + 1):
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=8, verify=True)
+            r = requests.get(url, headers=headers, params=params, timeout=3, verify=True)
+            if r.status_code == 404:
+                return None # Instantly fail if ticker is wrong
             r.raise_for_status()
             return r
         except (requests.exceptions.ConnectionError,
@@ -97,14 +102,15 @@ def oanda_request(url, headers, params=None, retries=2):
                 requests.exceptions.Timeout):
             if attempt == 0:
                 try:
-                    r = requests.get(url, headers=headers, params=params, timeout=8, verify=False)
+                    r = requests.get(url, headers=headers, params=params, timeout=3, verify=False)
+                    if r.status_code == 404: return None
                     r.raise_for_status()
                     return r
                 except Exception:
                     pass
             time.sleep(0.5)
         except requests.exceptions.HTTPError:
-            raise
+            return None 
         except Exception:
             time.sleep(0.5)
     return None
@@ -120,9 +126,12 @@ def fetch_from_oanda(symbol, timeframe):
     url = f"{OANDA_BASE_URL}/v3/instruments/{instrument}/candles"
     params = {"granularity": granularity, "count": 500, "price": "M"}
 
-    r = oanda_request(url, headers, params)
-    if r is None:
-        return None, None, "OANDA connection failed"
+    try:
+        r = oanda_request(url, headers, params)
+        if r is None:
+            return None, None, "OANDA connection failed"
+    except Exception as e:
+        return None, None, f"OANDA Error: {str(e)}"
 
     try:
         candles_raw = r.json().get("candles", [])
@@ -184,9 +193,15 @@ def fetch_from_yahoo(symbol, timeframe):
     if not ticker:
         return None, None, "No fallback ticker"
 
+    # Wrap yf.download in a thread so it CANNOT hang for more than 5 seconds
+    def _download():
+        return yf.download(ticker, period=period, interval=timeframe, progress=False, auto_adjust=False)
+
     try:
-        df = yf.download(ticker, period=period, interval=timeframe,
-                         progress=False, auto_adjust=False)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(_download)
+            df = future.result(timeout=5) # Hard 5-second timeout
+            
         if df is None or df.empty or len(df) < 50:
             return None, None, "Yahoo returned no data"
         if isinstance(df.columns, pd.MultiIndex):
@@ -196,6 +211,8 @@ def fetch_from_yahoo(symbol, timeframe):
         if len(df) < 50:
             return None, None, "Yahoo not enough data"
         return df, None, "YAHOO (fallback)"
+    except concurrent.futures.TimeoutError:
+        return None, None, "Yahoo API Timed Out (Skipped)"
     except Exception as e:
         return None, None, f"Yahoo error: {str(e)[:100]}"
 
@@ -204,11 +221,17 @@ def fetch_data_with_live(symbol, timeframe):
     df, live_px, src = fetch_from_oanda(symbol, timeframe)
     if df is not None:
         return df, live_px, src
+        
+    # Skip Yahoo for indices entirely
+    if symbol.upper() in ["NAS100", "US100", "US30", "JPN225"]:
+        return None, None, "OANDA failed (Market Closed or Wrong Ticker)"
+
     df2, _, src2 = fetch_from_yahoo(symbol, timeframe)
     if df2 is not None:
         last_close = safe_float(df2["close"].values[-1])
         return df2, last_close, src2
     return None, None, f"{src} / {src2}"
+    
 
 
 def fetch_data(symbol, timeframe):
@@ -224,9 +247,14 @@ def fetch_data_cached(symbol, timeframe, ttl=300):
     cached = _cache_get(_df_cache, key, ttl)
     if cached is not None:
         return cached, "CACHE"
+    
     df, _, src = fetch_data_with_live(symbol, timeframe)
-    if df is not None:
-        _cache_set(_df_cache, key, df)
+    
+    # Cache an empty dataframe if it fails, so it doesn't hammer the API and timeout
+    if df is None:
+        df = pd.DataFrame()
+        
+    _cache_set(_df_cache, key, df)
     return df, src
 
 

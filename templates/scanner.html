@@ -1774,7 +1774,6 @@ function renderData(data, isRefresh) {
   updateSMTPanel(data);
   updateSetupPanel(data);
 
-  // --- DISPLACEMENT WARNING HANDLING ---
   const dispWarn = document.getElementById('displacementWarning');
   const dispText = document.getElementById('displacementText');
   const setupPanel = document.getElementById('setupPanel');
@@ -1787,7 +1786,6 @@ function renderData(data, isRefresh) {
       dispWarn.style.display = 'none';
       if (setupPanel) setupPanel.style.display = 'block'; 
   }
-  // -------------------------------------
 
   const src = data.data_source || '';
   const priceEl = document.getElementById('priceDisplay');
@@ -1892,7 +1890,7 @@ window.addEventListener('load', () => {
       statusEl.textContent = 'Refreshing...';
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // Increased to 30 seconds
 
       fetch(`/api/scanner?symbol=${meta.symbol}&tf=${meta.tf}`, {
         cache: 'no-store',
