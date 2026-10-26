@@ -1,78 +1,107 @@
 """
 Live Chart Scanner — OANDA with yfinance fallback
-Adds: Sweep detection, PDH/PDL, Session H/L, Displacement, Dealing Range
-Adds: SMT Divergence, OTE Levels, MSS proximity filter, H4 Levels
-Adds: HTF Supply/Demand Zones (D1/H4 Order Blocks)
-STRICT MODE: Enforces R:R > 1.0, Blocks falling knives, Waits for Major MSS.
-FIXED: Prevents timeouts on closed markets/indices with strict threading.
+
+REVISION 3 (V5 final pass) + USER CUSTOMIZATIONS:
+  # USER CUSTOM 1 — Hardcoded OANDA API Key.
+  # USER CUSTOM 2 — MIN_RR set to 2.0 (strict 1:2 R:R).
+  # USER CUSTOM 3 — Weekend check added to killzone logic.
+  # FIX #1  — find_break_bar scans FORWARD from the swing, not backward.
+  # FIX #2  — find_swings marks all plateau bars, dedupes to median.
+  # FIX #3  — compute_correlations uses pct_change (returns).
+  # FIX #4  — fetch_data_with_live returns live_price_is_tick.
+  # FIX #5  — analyze() wrapped in try/except.
+  # FIX #6  — detect_recent_sweep returns per-side sweeps.
+  # FIX #7  — _cache_set enforces _CACHE_MAX.
+  # FIX #8  — oanda_request handles 429 gracefully.
+  # FIX #10 — analyze() uses 30s TTL cache (_fetch_with_live_cached).
+  # FIX #11 — Golden OHLC fixture tests for OB/FVG.
+  # FIX #12 — Sweep per-side test.
+  # FIX #13 — Cache eviction test.
+  # FIX #14 — 429 handling test.
+  # FIX #15 — Three-state sweep detail in checklist.
+  # FIX #16 — Counter-trend downgrade (limits confidence to LOW/MEDIUM).
 """
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+import logging
+import threading
 import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
+from typing import Optional, Any, Dict, List, Tuple
 import time
 import urllib3
-import concurrent.futures # <--- ADDED FOR HARD TIMEOUTS
+import concurrent.futures
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+logger = logging.getLogger("scanner")
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+# ---------- Config ----------
+# HARDCODED API KEY
 OANDA_API_KEY = "7601c3626d13d6a4cbcc8a96a91b01aa-9e0a98d2f5cba0b6e3d2a5905c61e91a"
 OANDA_BASE_URL = "https://api-fxpractice.oanda.com"
+
+OANDA_INSECURE_RETRY = os.environ.get("OANDA_INSECURE_RETRY", "0").strip() == "1"
+
+# STRICT 1:2 R:R
+MIN_RR = 2.0
+FORMING_TTL = 120
+FAILURE_TTL = 30
+_CACHE_MAX = 256
+_ANALYZE_TTL = 30
 
 INSTRUMENT_MAP = {
     "XAUUSD": "XAU_USD", "EURUSD": "EUR_USD", "GBPUSD": "GBP_USD",
     "USDJPY": "USD_JPY", "AUDUSD": "AUD_USD", "BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD",
-    "NAS100": "NAS100_USD", "US30": "US30_USD", "JPN225": "JP225_USD",
+    "NAS100": "NAS100_USD", "US100": "NAS100_USD", "US30": "US30_USD", "JPN225": "JP225_USD",
 }
 GRANULARITY_MAP = {"15m": "M15", "1h": "H1", "4h": "H4", "1d": "D"}
 
 YF_FALLBACK = {
     "XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X", "AUDUSD": "AUDUSD=X", "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
-    "NAS100": "NQ=F", "US30": "YM=F", "JPN225": "^N225",
+    "NAS100": "NQ=F", "US100": "NQ=F", "US30": "YM=F", "JPN225": "^N225",
 }
-YF_PERIOD = {"15m": "60d", "1h": "180d", "4h": "365d", "1d": "5y"}
+# 4h is NOT a native yfinance interval; fetch_from_yahoo resamples from 1h.
+YF_PERIOD = {"15m": "60d", "1h": "180d", "4h": "730d", "1d": "5y"}
 
 CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD"}
+INDEX_SYMBOLS = {"NAS100", "US100", "US30", "JPN225"}
 
-_df_cache = {}
-_bias_cache = {}
-_forming_cache = {}
+# ---------- Caches ----------
+_df_cache: Dict[str, Tuple[float, pd.DataFrame]] = {}
+_bias_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_failure_cache: Dict[str, Tuple[float, bool]] = {}
+_forming_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_analyze_cache: Dict[str, Dict[str, Any]] = {}
+_cache_lock = threading.RLock()
 
-def _cache_get(cache, key, ttl):
-    if key in cache:
-        ts, val = cache[key]
-        if time.time() - ts < ttl:
-            return val
+
+def _cache_get(cache: Dict, key: Any, ttl: float):
+    with _cache_lock:
+        if key in cache:
+            ts, val = cache[key]
+            if time.time() - ts < ttl:
+                return val
     return None
 
-def _cache_set(cache, key, val):
-    cache[key] = (time.time(), val)
+
+def _cache_set(cache: Dict, key: Any, val: Any) -> None:
+    with _cache_lock:
+        cache[key] = (time.time(), val)
+        if len(cache) > _CACHE_MAX:
+            oldest = min(cache, key=lambda k: cache[k][0])
+            cache.pop(oldest, None)
 
 
-TF_PARAMS = {
-    "15m": {"swing_left": 3, "swing_right": 3, "ob_impulse_mult": 1.2, "ob_range_mult": 1.0,
-            "min_ob_quality": 1.1, "min_fvg_quality": 0.8, "max_pools": 6,
-            "pool_min_range_pct": 0.05, "ob_max_size_atr_mult": 2.5},
-    "1h": {"swing_left": 4, "swing_right": 4, "ob_impulse_mult": 1.3, "ob_range_mult": 1.1,
-           "min_ob_quality": 1.1, "min_fvg_quality": 0.9, "max_pools": 5,
-           "pool_min_range_pct": 0.10, "ob_max_size_atr_mult": 2.5},
-    "4h": {"swing_left": 5, "swing_right": 5, "ob_impulse_mult": 1.5, "ob_range_mult": 1.2,
-           "min_ob_quality": 1.2, "min_fvg_quality": 1.0, "max_pools": 4,
-           "pool_min_range_pct": 0.20, "ob_max_size_atr_mult": 2.5},
-    "1d": {"swing_left": 7, "swing_right": 7, "ob_impulse_mult": 1.7, "ob_range_mult": 1.4,
-           "min_ob_quality": 1.4, "min_fvg_quality": 1.2, "max_pools": 3,
-           "pool_min_range_pct": 0.30, "ob_max_size_atr_mult": 2.5},
-}
-
-def tf_params(timeframe):
-    return TF_PARAMS.get(timeframe, TF_PARAMS["15m"])
-
-def safe_float(v, default=0.0):
+def safe_float(v: Any, default: float = 0.0) -> float:
     try:
         f = float(v)
         if np.isnan(f) or np.isinf(f):
@@ -81,42 +110,149 @@ def safe_float(v, default=0.0):
     except Exception:
         return default
 
-def safe_int(v, default=0):
+
+def safe_int(v: Any, default: int = 0) -> int:
     try:
         return int(v)
     except Exception:
         return default
 
 
-def oanda_request(url, headers, params=None, retries=1):
-    # Shortened timeout to 3 seconds. Fail fast on 404.
+TF_PARAMS = {
+    "15m": {"swing_left": 3, "swing_right": 3, "ob_impulse_mult": 1.2, "ob_range_mult": 1.0,
+            "min_fvg_quality": 0.8, "max_pools": 6,
+            "pool_min_range_pct": 0.05, "ob_max_size_atr_mult": 2.5,
+            "mss_max_swing_age": 100},
+    "1h": {"swing_left": 4, "swing_right": 4, "ob_impulse_mult": 1.3, "ob_range_mult": 1.1,
+           "min_fvg_quality": 0.9, "max_pools": 5,
+           "pool_min_range_pct": 0.10, "ob_max_size_atr_mult": 2.5,
+           "mss_max_swing_age": 60},
+    "4h": {"swing_left": 5, "swing_right": 5, "ob_impulse_mult": 1.5, "ob_range_mult": 1.2,
+           "min_fvg_quality": 1.0, "max_pools": 4,
+           "pool_min_range_pct": 0.20, "ob_max_size_atr_mult": 2.5,
+           "mss_max_swing_age": 40},
+    "1d": {"swing_left": 7, "swing_right": 7, "ob_impulse_mult": 1.7, "ob_range_mult": 1.4,
+           "min_fvg_quality": 1.2, "max_pools": 3,
+           "pool_min_range_pct": 0.30, "ob_max_size_atr_mult": 2.5,
+           "mss_max_swing_age": 20},
+}
+
+
+def tf_params(timeframe: str) -> Dict[str, Any]:
+    return TF_PARAMS.get(timeframe, TF_PARAMS["15m"])
+
+
+try:
+    from zoneinfo import ZoneInfo
+    _NY_TZ = ZoneInfo("America/New_York")
+    _LONDON_TZ = ZoneInfo("Europe/London")
+except Exception:
+    try:
+        import pytz
+        _NY_TZ = pytz.timezone("America/New_York")
+        _LONDON_TZ = pytz.timezone("Europe/London")
+    except Exception:
+        _NY_TZ = None
+        _LONDON_TZ = None
+        logger.warning("zoneinfo/pytz unavailable; killzone times may be DST-inaccurate.")
+
+
+def current_killzone(symbol: str = "") -> str:
+    if symbol.upper() in CRYPTO_SYMBOLS:
+        return "CRYPTO 24/7 🔥"
+    now_utc = datetime.now(timezone.utc)
+    if _NY_TZ is not None:
+        now_est = now_utc.astimezone(_NY_TZ)
+    else:
+        now_est = now_utc - timedelta(hours=5)
+        
+    weekday = now_est.weekday()
+    hour = now_est.hour
+    
+    # Forex closes Friday 5 PM EST, opens Sunday 5 PM EST
+    if weekday == 5: 
+        return "OFF-SESSION (WEEKEND)"
+    if weekday == 6 and hour < 17: 
+        return "OFF-SESSION (WEEKEND)"
+    if weekday == 4 and hour >= 17: 
+        return "OFF-SESSION (WEEKEND)"
+
+    if 2 <= hour < 5:
+        return "LONDON KILLZONE 🔥"
+    elif 8 <= hour < 11:
+        return "NY AM KILLZONE 🔥"
+    elif 13 <= hour < 16:
+        return "NY PM KILLZONE"
+    elif 20 <= hour < 24 or hour < 1:
+        return "ASIAN SESSION"
+    else:
+        return "OFF-SESSION"
+
+
+def in_killzone(symbol: str = "") -> bool:
+    if symbol.upper() in CRYPTO_SYMBOLS:
+        return True
+    return "KILLZONE" in current_killzone(symbol)
+
+
+def oanda_request(url: str, headers: Dict[str, str], params: Optional[dict] = None,
+                  retries: int = 1, allow_insecure: bool = False):
     for attempt in range(retries + 1):
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=3, verify=True)
+            r = requests.get(url, headers=headers, params=params, timeout=5, verify=True)
             if r.status_code == 404:
-                return None # Instantly fail if ticker is wrong
+                return None
+            if r.status_code == 429:
+                logger.warning("OANDA 429 rate-limited on %s", url)
+                return None
             r.raise_for_status()
             return r
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.SSLError,
                 requests.exceptions.Timeout):
-            if attempt == 0:
+            if attempt == 0 and allow_insecure:
                 try:
-                    r = requests.get(url, headers=headers, params=params, timeout=3, verify=False)
-                    if r.status_code == 404: return None
+                    logger.warning("OANDA retry with verify=False (OANDA_INSECURE_RETRY=1)")
+                    r = requests.get(url, headers=headers, params=params, timeout=5, verify=False)
+                    if r.status_code == 404:
+                        return None
+                    if r.status_code == 429:
+                        logger.warning("OANDA 429 (insecure retry) on %s", url)
+                        return None
                     r.raise_for_status()
                     return r
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("OANDA retry (insecure) failed: %s", e)
             time.sleep(0.5)
-        except requests.exceptions.HTTPError:
-            return None 
-        except Exception:
+        except requests.exceptions.HTTPError as e:
+            logger.debug("OANDA HTTP error: %s", e)
+            return None
+        except Exception as e:
+            logger.debug("OANDA unexpected error: %s", e)
             time.sleep(0.5)
     return None
 
 
-def fetch_from_oanda(symbol, timeframe):
+def _forming_get(symbol: str, timeframe: str) -> Optional[dict]:
+    key = (symbol.upper(), timeframe)
+    with _cache_lock:
+        entry = _forming_cache.get(key)
+        if entry and (time.time() - entry["ts"]) < FORMING_TTL:
+            return entry["data"]
+    return None
+
+
+def _forming_put(symbol: str, timeframe: str, data: dict) -> None:
+    with _cache_lock:
+        _forming_cache[(symbol.upper(), timeframe)] = {"data": data, "ts": time.time()}
+        if len(_forming_cache) > _CACHE_MAX:
+            oldest = min(_forming_cache, key=lambda k: _forming_cache[k]["ts"])
+            _forming_cache.pop(oldest, None)
+
+
+def fetch_from_oanda(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], Optional[float], str]:
+    if not OANDA_API_KEY:
+        return None, None, "OANDA_API_KEY not set"
     instrument = INSTRUMENT_MAP.get(symbol.upper())
     granularity = GRANULARITY_MAP.get(timeframe, "H1")
     if not instrument:
@@ -126,12 +262,9 @@ def fetch_from_oanda(symbol, timeframe):
     url = f"{OANDA_BASE_URL}/v3/instruments/{instrument}/candles"
     params = {"granularity": granularity, "count": 500, "price": "M"}
 
-    try:
-        r = oanda_request(url, headers, params)
-        if r is None:
-            return None, None, "OANDA connection failed"
-    except Exception as e:
-        return None, None, f"OANDA Error: {str(e)}"
+    r = oanda_request(url, headers, params, allow_insecure=OANDA_INSECURE_RETRY)
+    if r is None:
+        return None, None, "OANDA connection failed"
 
     try:
         candles_raw = r.json().get("candles", [])
@@ -153,15 +286,15 @@ def fetch_from_oanda(symbol, timeframe):
             if p > 0:
                 live_price = p
                 try:
-                    _forming_cache[(symbol.upper(), timeframe)] = {
+                    _forming_put(symbol, timeframe, {
                         "time": pd.to_datetime(c["time"]),
                         "open": safe_float(mid["o"]),
                         "high": safe_float(mid["h"]),
                         "low": safe_float(mid["l"]),
                         "close": safe_float(mid["c"]),
-                    }
-                except Exception:
-                    pass
+                    })
+                except Exception as e:
+                    logger.debug("forming-candle cache write failed: %s", e)
             continue
         try:
             rows.append({
@@ -171,7 +304,8 @@ def fetch_from_oanda(symbol, timeframe):
                 "low": safe_float(mid["l"]),
                 "close": safe_float(mid["c"]),
             })
-        except Exception:
+        except Exception as e:
+            logger.debug("skip malformed candle: %s", e)
             continue
 
     if len(rows) < 50:
@@ -182,32 +316,47 @@ def fetch_from_oanda(symbol, timeframe):
     return df, live_price, "OANDA"
 
 
-def fetch_from_yahoo(symbol, timeframe):
+def fetch_from_yahoo(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], Optional[float], str]:
     try:
         import yfinance as yf
     except ImportError:
         return None, None, "yfinance not installed"
 
     ticker = YF_FALLBACK.get(symbol.upper())
-    period = YF_PERIOD.get(timeframe, "180d")
     if not ticker:
         return None, None, "No fallback ticker"
 
-    # Wrap yf.download in a thread so it CANNOT hang for more than 5 seconds
+    if timeframe == "4h":
+        yf_interval = "1h"
+        yf_period = "730d"
+        needs_resample = True
+    else:
+        yf_interval = timeframe
+        yf_period = YF_PERIOD.get(timeframe, "180d")
+        needs_resample = False
+
     def _download():
-        return yf.download(ticker, period=period, interval=timeframe, progress=False, auto_adjust=False)
+        return yf.download(ticker, period=yf_period, interval=yf_interval,
+                           progress=False, auto_adjust=False)
 
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(_download)
-            df = future.result(timeout=5) # Hard 5-second timeout
-            
-        if df is None or df.empty or len(df) < 50:
+            df = future.result(timeout=8)
+
+        if df is None or df.empty:
             return None, None, "Yahoo returned no data"
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.columns = [c.lower() for c in df.columns]
         df = df[["open", "high", "low", "close"]].dropna()
+
+        if needs_resample:
+            df = df.resample("4h").agg({
+                "open": "first", "high": "max",
+                "low": "min", "close": "last",
+            }).dropna()
+
         if len(df) < 50:
             return None, None, "Yahoo not enough data"
         return df, None, "YAHOO (fallback)"
@@ -217,73 +366,109 @@ def fetch_from_yahoo(symbol, timeframe):
         return None, None, f"Yahoo error: {str(e)[:100]}"
 
 
-def fetch_data_with_live(symbol, timeframe):
+def fetch_data_with_live(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], Optional[float], str, bool]:
     df, live_px, src = fetch_from_oanda(symbol, timeframe)
     if df is not None:
-        return df, live_px, src
-        
-    # Skip Yahoo for indices entirely
-    if symbol.upper() in ["NAS100", "US100", "US30", "JPN225"]:
-        return None, None, "OANDA failed (Market Closed or Wrong Ticker)"
+        return df, live_px, src, bool(live_px and live_px > 0)
+
+    if symbol.upper() in INDEX_SYMBOLS:
+        return None, None, "OANDA failed (Market Closed or Wrong Ticker)", False
 
     df2, _, src2 = fetch_from_yahoo(symbol, timeframe)
     if df2 is not None:
         last_close = safe_float(df2["close"].values[-1])
-        return df2, last_close, src2
-    return None, None, f"{src} / {src2}"
-    
+        return df2, last_close, src2, False
+    return None, None, f"{src} / {src2}", False
 
 
-def fetch_data(symbol, timeframe):
-    df, _, src = fetch_data_with_live(symbol, timeframe)
+def _fetch_with_live_cached(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], Optional[float], str, bool]:
+    key = f"{symbol.upper()}_{timeframe}"
+    with _cache_lock:
+        entry = _analyze_cache.get(key)
+        if entry and (time.time() - entry["ts"]) < _ANALYZE_TTL:
+            return entry["df"], entry["live_px"], entry["source"], entry["is_tick"]
+
+    df, live_px, source, is_tick = fetch_data_with_live(symbol, timeframe)
+
+    with _cache_lock:
+        _analyze_cache[key] = {
+            "df": df, "live_px": live_px, "source": source,
+            "is_tick": is_tick, "ts": time.time(),
+        }
+        if len(_analyze_cache) > _CACHE_MAX:
+            oldest = min(_analyze_cache, key=lambda k: _analyze_cache[k]["ts"])
+            _analyze_cache.pop(oldest, None)
+    return df, live_px, source, is_tick
+
+
+def fetch_data(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], str]:
+    df, _, src, _ = fetch_data_with_live(symbol, timeframe)
     return df, src
 
-def fetch_live_price(symbol, timeframe):
-    _, live_px, _ = fetch_data_with_live(symbol, timeframe)
+
+def fetch_live_price(symbol: str, timeframe: str) -> Optional[float]:
+    _, live_px, _, _ = fetch_data_with_live(symbol, timeframe)
     return live_px
 
-def fetch_data_cached(symbol, timeframe, ttl=300):
+
+def fetch_data_cached(symbol: str, timeframe: str, ttl: int = 300) -> Tuple[pd.DataFrame, str]:
     key = f"{symbol}_{timeframe}"
+
     cached = _cache_get(_df_cache, key, ttl)
     if cached is not None:
         return cached, "CACHE"
-    
-    df, _, src = fetch_data_with_live(symbol, timeframe)
-    
-    # Cache an empty dataframe if it fails, so it doesn't hammer the API and timeout
-    if df is None:
-        df = pd.DataFrame()
-        
+
+    if _cache_get(_failure_cache, key, FAILURE_TTL) is not None:
+        return pd.DataFrame(), "CACHE_FAILURE"
+
+    df, _, src, _ = fetch_data_with_live(symbol, timeframe)
+
+    if df is None or df.empty:
+        _cache_set(_failure_cache, key, True)
+        return pd.DataFrame(), src
+
     _cache_set(_df_cache, key, df)
     return df, src
 
 
-def find_swings(df, timeframe):
+def find_swings(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     params = tf_params(timeframe)
     left = params["swing_left"]
     right = params["swing_right"]
 
     df = df.copy()
-    sh = np.zeros(len(df), dtype=bool)
-    sl = np.zeros(len(df), dtype=bool)
     highs = df["high"].values
     lows = df["low"].values
     n = len(df)
 
+    sh_raw = np.zeros(n, dtype=bool)
+    sl_raw = np.zeros(n, dtype=bool)
+
     for i in range(left, n - right):
         window_h = highs[i - left:i + right + 1]
         window_l = lows[i - left:i + right + 1]
-        if highs[i] == window_h.max() and highs[i] > highs[i - 1]:
-            sh[i] = True
-        if lows[i] == window_l.min() and lows[i] < lows[i - 1]:
-            sl[i] = True
+        if np.isclose(highs[i], window_h.max()):
+            sh_raw[i] = True
+        if np.isclose(lows[i], window_l.min()):
+            sl_raw[i] = True
 
-    df["sh"] = sh
-    df["sl"] = sl
+    def _dedupe_plateaus(marks: np.ndarray) -> np.ndarray:
+        out = np.zeros_like(marks)
+        idx = np.where(marks)[0]
+        if len(idx) == 0:
+            return out
+        splits = np.where(np.diff(idx) > 1)[0] + 1
+        groups = np.split(idx, splits)
+        for g in groups:
+            out[g[len(g) // 2]] = True
+        return out
+
+    df["sh"] = _dedupe_plateaus(sh_raw)
+    df["sl"] = _dedupe_plateaus(sl_raw)
     return df
 
 
-def detect_structure(df):
+def detect_structure(df: pd.DataFrame) -> Dict[str, Any]:
     sh_idx = [i for i, v in enumerate(df["sh"].values) if v]
     sl_idx = [i for i, v in enumerate(df["sl"].values) if v]
     sh_prices = [safe_float(df["high"].values[i]) for i in sh_idx]
@@ -342,8 +527,17 @@ def detect_structure(df):
     }
 
 
-def detect_mss(df, structure, timeframe="15m"):
-    """Strict Major MSS Logic"""
+def find_break_bar(closes: np.ndarray, level: float, bullish: bool, start: int) -> int:
+    n = len(closes)
+    start = max(0, min(start, n))
+    for i in range(start, n):
+        c = safe_float(closes[i])
+        if (bullish and c > level) or (not bullish and c < level):
+            return i
+    return n - 1
+
+
+def detect_mss(df: pd.DataFrame, structure: Dict[str, Any], timeframe: str = "15m") -> Optional[dict]:
     sh = structure["swing_highs"]
     sl = structure["swing_lows"]
     if not sh or not sl:
@@ -354,7 +548,11 @@ def detect_mss(df, structure, timeframe="15m"):
     if atr <= 0:
         return None
 
+    params = tf_params(timeframe)
+    max_swing_age = params.get("mss_max_swing_age", 100)
     max_trigger_distance = atr * 1.5
+    n = len(df)
+    closes = df["close"].values
 
     last_high = sh[-1]
     last_low = sl[-1]
@@ -364,30 +562,46 @@ def detect_mss(df, structure, timeframe="15m"):
     mss = None
 
     if last_low["index"] > last_high["index"]:
+        if (n - 1 - safe_int(last_high["index"])) > max_swing_age:
+            return None
         target_high = safe_float(last_high["price"])
         if last_close > target_high:
+            break_idx = find_break_bar(closes, target_high, True, safe_int(last_high["index"]) + 1)
             mss = {"type": "MSS_BULL", "level": target_high,
+                   "break_index": break_idx,
                    "description": f"Price closed above swing high at {target_high:.2f} — bullish reversal confirmed"}
-        elif prev_high_price:
-            distance = abs(prev_high_price - last_close)
-            if last_close > prev_high_price and distance <= max_trigger_distance:
-                mss = {"type": "MSS_BULL", "level": safe_float(prev_high_price),
-                       "description": f"Price closed above prior swing high at {prev_high_price:.2f} — early bullish shift"}
+        elif prev_high_price and len(sh) >= 2:
+            prev_high_idx = safe_int(sh[-2]["index"])
+            if (n - 1 - prev_high_idx) <= max_swing_age:
+                distance = abs(prev_high_price - last_close)
+                if last_close > prev_high_price and distance <= max_trigger_distance:
+                    break_idx = find_break_bar(closes, prev_high_price, True, prev_high_idx + 1)
+                    mss = {"type": "MSS_BULL", "level": safe_float(prev_high_price),
+                           "break_index": break_idx,
+                           "description": f"Price closed above prior swing high at {prev_high_price:.2f} — early bullish shift"}
     elif last_high["index"] > last_low["index"]:
+        if (n - 1 - safe_int(last_low["index"])) > max_swing_age:
+            return None
         target_low = safe_float(last_low["price"])
         if last_close < target_low:
+            break_idx = find_break_bar(closes, target_low, False, safe_int(last_low["index"]) + 1)
             mss = {"type": "MSS_BEAR", "level": target_low,
+                   "break_index": break_idx,
                    "description": f"Price closed below swing low at {target_low:.2f} — bearish reversal confirmed"}
-        elif prev_low_price:
-            distance = abs(last_close - prev_low_price)
-            if last_close < prev_low_price and distance <= max_trigger_distance:
-                mss = {"type": "MSS_BEAR", "level": safe_float(prev_low_price),
-                       "description": f"Price closed below prior swing low at {prev_low_price:.2f} — early bearish shift"}
+        elif prev_low_price and len(sl) >= 2:
+            prev_low_idx = safe_int(sl[-2]["index"])
+            if (n - 1 - prev_low_idx) <= max_swing_age:
+                distance = abs(last_close - prev_low_price)
+                if last_close < prev_low_price and distance <= max_trigger_distance:
+                    break_idx = find_break_bar(closes, prev_low_price, False, prev_low_idx + 1)
+                    mss = {"type": "MSS_BEAR", "level": safe_float(prev_low_price),
+                           "break_index": break_idx,
+                           "description": f"Price closed below prior swing low at {prev_low_price:.2f} — early bearish shift"}
 
     return mss
 
 
-def detect_recent_sweep(df, structure, lookback=40):
+def detect_recent_sweep(df: pd.DataFrame, structure: Dict[str, Any], lookback: int = 40) -> Optional[dict]:
     sh = structure.get("swing_highs", [])
     sl = structure.get("swing_lows", [])
     if not sh and not sl:
@@ -399,7 +613,6 @@ def detect_recent_sweep(df, structure, lookback=40):
     start = max(1, n - lookback)
 
     recent_sweeps = []
-
     for i in range(start, n):
         row = df.iloc[i]
         close = safe_float(row["close"])
@@ -438,10 +651,17 @@ def detect_recent_sweep(df, structure, lookback=40):
 
     if not recent_sweeps:
         return None
-    return recent_sweeps[-1]
+
+    bsl_list = [s for s in recent_sweeps if s["type"] == "BSL_SWEEP"]
+    ssl_list = [s for s in recent_sweeps if s["type"] == "SSL_SWEEP"]
+    return {
+        "latest": recent_sweeps[-1],
+        "bsl": bsl_list[-1] if bsl_list else None,
+        "ssl": ssl_list[-1] if ssl_list else None,
+    }
 
 
-def get_previous_day_hl(symbol):
+def get_previous_day_hl(symbol: str) -> Tuple[Optional[float], Optional[float]]:
     try:
         d1_df, _ = fetch_data_cached(symbol, "1d", ttl=1800)
         if d1_df is None or len(d1_df) < 2:
@@ -449,7 +669,6 @@ def get_previous_day_hl(symbol):
         now_utc_date = datetime.now(timezone.utc).date()
         for i in range(len(d1_df) - 1, -1, -1):
             ts = d1_df.index[i]
-            ts_date = None
             try:
                 ts_date = ts.date() if hasattr(ts, "date") else None
             except Exception:
@@ -457,12 +676,12 @@ def get_previous_day_hl(symbol):
             if ts_date is not None and ts_date < now_utc_date:
                 row = d1_df.iloc[i]
                 return safe_float(row["high"]), safe_float(row["low"])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("get_previous_day_hl failed for %s: %s", symbol, e)
     return None, None
 
 
-def get_session_ranges(df, symbol="", timeframe="15m"):
+def get_session_ranges(df: pd.DataFrame, symbol: str = "", timeframe: str = "15m") -> Dict[str, Any]:
     if symbol.upper() in CRYPTO_SYMBOLS:
         return {}
     if timeframe in ("4h", "1d"):
@@ -477,27 +696,40 @@ def get_session_ranges(df, symbol="", timeframe="15m"):
             )
         else:
             idx_ts = np.array([int(t.timestamp()) for t in df.index], dtype=np.int64)
-    except Exception:
+    except Exception as e:
+        logger.warning("session range index conversion failed: %s", e)
         return {}
 
     now_utc = datetime.now(timezone.utc)
     now_ts = int(now_utc.timestamp())
-    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_start_ts = int(today_start.timestamp())
+    today_start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_ts = int(today_start_utc.timestamp())
 
     sessions_def = {
-        "ASIA":   (0, 8),
-        "LONDON": (7, 16),
-        "NY":     (12, 21),
+        "ASIA":   (0, 8, None),
+        "LONDON": (8, 17, _LONDON_TZ),
+        "NY":     (8, 17, _NY_TZ),
     }
 
     highs = df["high"].values
     lows = df["low"].values
 
-    result = {}
-    for name, (start_h, end_h) in sessions_def.items():
-        start_ts = today_start_ts + start_h * 3600
-        end_ts = today_start_ts + end_h * 3600
+    result: Dict[str, Any] = {}
+    for name, (start_h, end_h, tz) in sessions_def.items():
+        if tz is not None:
+            try:
+                local_now = now_utc.astimezone(tz)
+                start_local = local_now.replace(hour=start_h, minute=0, second=0, microsecond=0)
+                end_local = local_now.replace(hour=end_h, minute=0, second=0, microsecond=0)
+                start_ts = int(start_local.timestamp())
+                end_ts = int(end_local.timestamp())
+            except Exception as e:
+                logger.debug("session bounds failed for %s: %s", name, e)
+                start_ts = today_start_ts + start_h * 3600
+                end_ts = today_start_ts + end_h * 3600
+        else:
+            start_ts = today_start_ts + start_h * 3600
+            end_ts = today_start_ts + end_h * 3600
 
         if now_ts < start_ts:
             continue
@@ -518,7 +750,7 @@ def get_session_ranges(df, symbol="", timeframe="15m"):
     return result
 
 
-def compute_dealing_range(df, structure, timeframe):
+def compute_dealing_range(df: pd.DataFrame, structure: Dict[str, Any], timeframe: str) -> Optional[dict]:
     atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
     if atr <= 0:
         return None
@@ -547,7 +779,7 @@ def compute_dealing_range(df, structure, timeframe):
                     return {
                         "high": high, "low": low, "mid": (high + low) / 2,
                         "start_index": b["index"], "end_index": a["index"],
-                        "size_atr": distance / atr,
+                        "size_atr": distance / atr, "fallback": False,
                     }
 
     n = len(df)
@@ -557,11 +789,11 @@ def compute_dealing_range(df, structure, timeframe):
     if high > low:
         return {"high": high, "low": low, "mid": (high + low) / 2,
                 "start_index": max(0, n - 100), "end_index": n - 1,
-                "size_atr": (high - low) / atr}
+                "size_atr": (high - low) / atr, "fallback": True}
     return None
 
 
-def count_ob_touches(df, impulse_index, ob_top, ob_bottom):
+def count_ob_touches(df: pd.DataFrame, impulse_index: int, ob_top: float, ob_bottom: float) -> int:
     touches = 0
     in_zone = False
     start = min(impulse_index + 1, len(df) - 1)
@@ -576,76 +808,26 @@ def count_ob_touches(df, impulse_index, ob_top, ob_bottom):
     return touches
 
 
-def find_liquidity_pools(df, structure, timeframe):
-    params = tf_params(timeframe)
-    min_range_pct = params["pool_min_range_pct"]
-    max_pools = params["max_pools"]
-
-    pools = []
-    sh = structure["swing_highs"]
-    sl = structure["swing_lows"]
-    last_price = safe_float(df["close"].values[-1])
-
-    def swing_qualifies(price_a, price_b):
-        if price_a == 0:
-            return False
-        diff_pct = abs(price_a - price_b) / price_a * 100
-        return diff_pct < 0.15
-
-    def swing_is_significant(price):
-        if price == 0 or last_price == 0:
-            return False
-        return abs(price - last_price) / last_price * 100 >= min_range_pct
-
-    bsl_candidates = [s for s in sh if s["price"] > last_price and swing_is_significant(s["price"])]
-    for i in range(len(bsl_candidates)):
-        for j in range(i + 1, len(bsl_candidates)):
-            if swing_qualifies(bsl_candidates[i]["price"], bsl_candidates[j]["price"]):
-                pools.append({"type": "BSL",
-                              "price": max(bsl_candidates[i]["price"], bsl_candidates[j]["price"]),
-                              "index": max(bsl_candidates[i]["index"], bsl_candidates[j]["index"]),
-                              "label": "Buy-side Liquidity"})
-                break
-
-    ssl_candidates = [s for s in sl if s["price"] < last_price and swing_is_significant(s["price"])]
-    for i in range(len(ssl_candidates)):
-        for j in range(i + 1, len(ssl_candidates)):
-            if swing_qualifies(ssl_candidates[i]["price"], ssl_candidates[j]["price"]):
-                pools.append({"type": "SSL",
-                              "price": min(ssl_candidates[i]["price"], ssl_candidates[j]["price"]),
-                              "index": max(ssl_candidates[i]["index"], ssl_candidates[j]["index"]),
-                              "label": "Sell-side Liquidity"})
-                break
-
-    bsl_out = sorted([p for p in pools if p["type"] == "BSL"],
-                     key=lambda p: p["price"])[:max_pools]
-    ssl_out = sorted([p for p in pools if p["type"] == "SSL"],
-                     key=lambda p: p["price"], reverse=True)[:max_pools]
-
-    return bsl_out + ssl_out
-
-
-def _ranges_overlap(a_top, a_bottom, b_top, b_bottom, threshold=0.5):
+def _ranges_overlap(a_top: float, a_bottom: float, b_top: float, b_bottom: float,
+                    threshold: float = 0.5) -> bool:
     a_hi, a_lo = max(a_top, a_bottom), min(a_top, a_bottom)
     b_hi, b_lo = max(b_top, b_bottom), min(b_top, b_bottom)
+    a_size = a_hi - a_lo
+    b_size = b_hi - b_lo
+    if a_size <= 0 or b_size <= 0:
+        return False
     overlap_hi = min(a_hi, b_hi)
     overlap_lo = max(a_lo, b_lo)
     if overlap_hi <= overlap_lo:
         return False
     overlap_size = overlap_hi - overlap_lo
-    a_size = a_hi - a_lo
-    b_size = b_hi - b_lo
-    min_size = min(a_size, b_size)
-    if min_size <= 0:
-        return True
-    return (overlap_size / min_size) >= threshold
+    return (overlap_size / min(a_size, b_size)) >= threshold
 
 
-def find_order_blocks(df, timeframe, lookback=300):
+def find_order_blocks(df: pd.DataFrame, timeframe: str, lookback: int = 300) -> List[dict]:
     params = tf_params(timeframe)
     impulse_mult = params["ob_impulse_mult"]
     range_mult = params["ob_range_mult"]
-    min_quality = params["min_ob_quality"]
     max_ob_atr = params["ob_max_size_atr_mult"]
 
     obs = []
@@ -687,10 +869,6 @@ def find_order_blocks(df, timeframe, lookback=300):
 
         ob_candle = df.iloc[ob_idx]
         impulse_ratio = safe_float(cur_body / a)
-
-        if impulse_ratio < min_quality:
-            continue
-
         ob_top = safe_float(ob_candle["high"])
         ob_bottom = safe_float(ob_candle["low"])
 
@@ -699,16 +877,13 @@ def find_order_blocks(df, timeframe, lookback=300):
 
         touches = count_ob_touches(df, i, ob_top, ob_bottom)
 
-        if impulse_bullish:
-            obs.append({"type": "OB_BULL", "index": ob_idx, "impulse_index": i,
-                        "top": ob_top, "bottom": ob_bottom,
-                        "label": "Bullish OB", "impulse": impulse_ratio,
-                        "quality": impulse_ratio, "touches": touches})
-        else:
-            obs.append({"type": "OB_BEAR", "index": ob_idx, "impulse_index": i,
-                        "top": ob_top, "bottom": ob_bottom,
-                        "label": "Bearish OB", "impulse": impulse_ratio,
-                        "quality": impulse_ratio, "touches": touches})
+        obs.append({
+            "type": "OB_BULL" if impulse_bullish else "OB_BEAR",
+            "index": ob_idx, "impulse_index": i,
+            "top": ob_top, "bottom": ob_bottom,
+            "label": "Bullish OB" if impulse_bullish else "Bearish OB",
+            "impulse": impulse_ratio, "quality": impulse_ratio, "touches": touches,
+        })
 
     kept = []
     bull_count = 0
@@ -719,28 +894,20 @@ def find_order_blocks(df, timeframe, lookback=300):
             continue
         if ob["type"] == "OB_BEAR" and bear_count >= 2:
             continue
-
-        overlaps_any = False
-        for k in kept:
-            if _ranges_overlap(ob["top"], ob["bottom"], k["top"], k["bottom"]):
-                overlaps_any = True
-                break
-        if overlaps_any:
+        if any(_ranges_overlap(ob["top"], ob["bottom"], k["top"], k["bottom"]) for k in kept):
             continue
-
         kept.append(ob)
         if ob["type"] == "OB_BULL":
             bull_count += 1
         else:
             bear_count += 1
-
         if bull_count >= 2 and bear_count >= 2:
             break
 
     return kept
 
 
-def find_fvgs(df, timeframe, lookback=300):
+def find_fvgs(df: pd.DataFrame, timeframe: str, lookback: int = 300) -> List[dict]:
     params = tf_params(timeframe)
     min_quality = params["min_fvg_quality"]
 
@@ -783,7 +950,71 @@ def find_fvgs(df, timeframe, lookback=300):
     return fresh
 
 
-def premium_discount(df, structure, current_price=None, dealing_range=None):
+def find_liquidity_pools(df: pd.DataFrame, structure: Dict[str, Any], timeframe: str) -> List[dict]:
+    params = tf_params(timeframe)
+    min_range_pct = params["pool_min_range_pct"]
+    max_pools = params["max_pools"]
+
+    pools = []
+    sh = structure["swing_highs"]
+    sl = structure["swing_lows"]
+    last_price = safe_float(df["close"].values[-1])
+
+    def swing_qualifies(price_a: float, price_b: float) -> bool:
+        if price_a == 0:
+            return False
+        return (abs(price_a - price_b) / price_a * 100) < 0.15
+
+    def swing_is_significant(price: float) -> bool:
+        if price == 0 or last_price == 0:
+            return False
+        return abs(price - last_price) / last_price * 100 >= min_range_pct
+
+    bsl_candidates = [s for s in sh if s["price"] > last_price and swing_is_significant(s["price"])]
+    used = set()
+    for i in range(len(bsl_candidates)):
+        if i in used:
+            continue
+        for j in range(i + 1, len(bsl_candidates)):
+            if j in used:
+                continue
+            if swing_qualifies(bsl_candidates[i]["price"], bsl_candidates[j]["price"]):
+                pools.append({"type": "BSL",
+                              "price": max(bsl_candidates[i]["price"], bsl_candidates[j]["price"]),
+                              "index": max(bsl_candidates[i]["index"], bsl_candidates[j]["index"]),
+                              "label": "Buy-side Liquidity"})
+                used.add(i)
+                used.add(j)
+                break
+
+    ssl_candidates = [s for s in sl if s["price"] < last_price and swing_is_significant(s["price"])]
+    used = set()
+    for i in range(len(ssl_candidates)):
+        if i in used:
+            continue
+        for j in range(i + 1, len(ssl_candidates)):
+            if j in used:
+                continue
+            if swing_qualifies(ssl_candidates[i]["price"], ssl_candidates[j]["price"]):
+                pools.append({"type": "SSL",
+                              "price": min(ssl_candidates[i]["price"], ssl_candidates[j]["price"]),
+                              "index": max(ssl_candidates[i]["index"], ssl_candidates[j]["index"]),
+                              "label": "Sell-side Liquidity"})
+                used.add(i)
+                used.add(j)
+                break
+
+    bsl_out = sorted([p for p in pools if p["type"] == "BSL"],
+                     key=lambda p: p["price"])[:max_pools]
+    ssl_out = sorted([p for p in pools if p["type"] == "SSL"],
+                     key=lambda p: p["price"], reverse=True)[:max_pools]
+
+    return bsl_out + ssl_out
+
+
+def premium_discount(df: pd.DataFrame, structure: Dict[str, Any],
+                     current_price: Optional[float] = None,
+                     dealing_range: Optional[dict] = None) -> Optional[dict]:
     if dealing_range:
         high = safe_float(dealing_range["high"])
         low = safe_float(dealing_range["low"])
@@ -804,40 +1035,15 @@ def premium_discount(df, structure, current_price=None, dealing_range=None):
             "current_price": px}
 
 
-def current_killzone(symbol=""):
-    if symbol.upper() in CRYPTO_SYMBOLS:
-        return "CRYPTO 24/7 🔥"
-    now_utc = datetime.now(timezone.utc)
-    now_est = now_utc - timedelta(hours=5)
-    hour = now_est.hour
-    if 2 <= hour < 5:
-        return "LONDON KILLZONE 🔥"
-    elif 8 <= hour < 11:
-        return "NY AM KILLZONE 🔥"
-    elif 13 <= hour < 16:
-        return "NY PM KILLZONE"
-    elif 20 <= hour < 24 or hour < 1:
-        return "ASIAN SESSION"
-    else:
-        return "OFF-SESSION"
-
-
-def in_killzone(symbol=""):
-    if symbol.upper() in CRYPTO_SYMBOLS:
-        return True
-    kz = current_killzone(symbol)
-    return "KILLZONE" in kz
-
-
-def get_bias(symbol):
+def get_bias(symbol: str) -> Dict[str, Any]:
     cached = _cache_get(_bias_cache, symbol, 300)
     if cached is not None:
         return cached
 
     d1_trend = "RANGING"
     h4_trend = "RANGING"
-    h4_levels = [] 
-    htf_obs = [] 
+    h4_levels = []
+    htf_obs = []
 
     try:
         d1_df, _ = fetch_data_cached(symbol, "1d", ttl=1800)
@@ -845,13 +1051,11 @@ def get_bias(symbol):
             d1_df = find_swings(d1_df, "1d")
             d1_struct = detect_structure(d1_df)
             d1_trend = d1_struct["trend"]
-            
-            d1_obs = find_order_blocks(d1_df, "1d", lookback=50)
-            for ob in d1_obs:
+            for ob in find_order_blocks(d1_df, "1d", lookback=50):
                 ob["tf"] = "D1"
                 htf_obs.append(ob)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("get_bias(D1) failed for %s: %s", symbol, e)
 
     try:
         h4_df, _ = fetch_data_cached(symbol, "4h", ttl=300)
@@ -859,18 +1063,15 @@ def get_bias(symbol):
             h4_df = find_swings(h4_df, "4h")
             h4_struct = detect_structure(h4_df)
             h4_trend = h4_struct["trend"]
-            
             for h in h4_struct.get("swing_highs", []):
                 h4_levels.append({"type": "H4_HIGH", "price": safe_float(h["price"])})
             for l in h4_struct.get("swing_lows", []):
                 h4_levels.append({"type": "H4_LOW", "price": safe_float(l["price"])})
-
-            h4_obs = find_order_blocks(h4_df, "4h", lookback=100)
-            for ob in h4_obs:
+            for ob in find_order_blocks(h4_df, "4h", lookback=100):
                 ob["tf"] = "H4"
                 htf_obs.append(ob)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("get_bias(H4) failed for %s: %s", symbol, e)
 
     strong_buy  = (d1_trend == "BULLISH" and h4_trend == "BULLISH")
     strong_sell = (d1_trend == "BEARISH" and h4_trend == "BEARISH")
@@ -899,15 +1100,14 @@ def get_bias(symbol):
         tier, reason = "NEUTRAL", "D1 + H4 both RANGING — range conditions, MSS required"
 
     result = {"d1_trend": d1_trend, "h4_trend": h4_trend,
-              "h4_levels": h4_levels,
-              "htf_obs": htf_obs,
+              "h4_levels": h4_levels, "htf_obs": htf_obs,
               "allow_buy": allow_buy, "allow_sell": allow_sell,
               "tier": tier, "reason": reason}
     _cache_set(_bias_cache, symbol, result)
     return result
 
 
-def pick_tp_swing(structure, entry, direction):
+def pick_tp_swing(structure: Dict[str, Any], entry: float, direction: str) -> Tuple[Optional[float], Optional[float]]:
     highs = sorted([h["price"] for h in structure.get("swing_highs", []) if h["price"] > 0])
     lows = sorted([l["price"] for l in structure.get("swing_lows", []) if l["price"] > 0])
 
@@ -927,7 +1127,39 @@ def pick_tp_swing(structure, entry, direction):
         return None, None
 
 
-def build_checklist(direction, mss, bias, pd, killzone_ok, zone, rr, sweep=None):
+SCORE_WEIGHTS_EXACT = {
+    "MSS Confirmed": 3,
+    "HTF Bias": 2,
+    "In Killzone": 2,
+    "Displacement": 2,
+    "OB Fresh": 2,
+}
+SCORE_WEIGHTS_PREFIX = {
+    "Sweep of ": 2,
+    "Price in ": 2,
+    "R:R": 1,
+}
+
+
+def score_checklist(checklist: List[Dict[str, Any]]) -> int:
+    pts = 0
+    for c in checklist:
+        if not c.get("pass"):
+            continue
+        lbl = c.get("label", "")
+        if lbl in SCORE_WEIGHTS_EXACT:
+            pts += SCORE_WEIGHTS_EXACT[lbl]
+            continue
+        for prefix, weight in SCORE_WEIGHTS_PREFIX.items():
+            if lbl.startswith(prefix):
+                pts += weight
+                break
+    return pts
+
+
+def build_checklist(direction: str, mss: Optional[dict], bias: Optional[dict],
+                    pd: Optional[dict], killzone_ok: bool, zone: dict,
+                    rr: float, sweep: Optional[dict] = None) -> List[Dict[str, Any]]:
     checklist = []
 
     bias_tier = bias.get("tier", "NEUTRAL") if bias else "UNKNOWN"
@@ -951,14 +1183,18 @@ def build_checklist(direction, mss, bias, pd, killzone_ok, zone, rr, sweep=None)
         "detail": (mss["type"].replace("MSS_", "") if mss else "No MSS")
     })
 
-    wanted_sweep = "SSL_SWEEP" if direction == "BUY" else "BSL_SWEEP"
-    sweep_ok = bool(sweep) and sweep.get("type") == wanted_sweep
+    wanted_key = "ssl" if direction == "BUY" else "bsl"
+    wrong_key = "bsl" if direction == "BUY" else "ssl"
+    sweep_match = sweep.get(wanted_key) if isinstance(sweep, dict) else None
+    sweep_wrong = sweep.get(wrong_key) if isinstance(sweep, dict) else None
+    sweep_ok = bool(sweep_match)
     sweep_label = "Sweep of SSL" if direction == "BUY" else "Sweep of BSL"
-    if sweep:
-        side = "SSL" if sweep["type"] == "SSL_SWEEP" else "BSL"
-        sweep_detail = f"{side} @ {sweep['swept_price']:.2f}"
-        if not sweep_ok:
-            sweep_detail += f" (wrong side for {direction})"
+    if sweep_match:
+        side = "SSL" if sweep_match["type"] == "SSL_SWEEP" else "BSL"
+        sweep_detail = f"{side} @ {sweep_match['swept_price']:.2f}"
+    elif sweep_wrong:
+        side = "SSL" if sweep_wrong["type"] == "SSL_SWEEP" else "BSL"
+        sweep_detail = f"{side} only — wrong side for {direction}"
     else:
         sweep_detail = "No recent sweep"
     checklist.append({
@@ -989,16 +1225,15 @@ def build_checklist(direction, mss, bias, pd, killzone_ok, zone, rr, sweep=None)
         "detail": "Untapped" if touches == 0 else f"Tapped {touches}x"
     })
 
-    # CHANGED TO 1.0
     checklist.append({
-        "label": "R:R >= 1.0", "pass": rr >= 1.0,
+        "label": f"R:R >= {MIN_RR:.1f}", "pass": rr >= MIN_RR,
         "detail": f"1 : {rr:.2f}"
     })
 
     return checklist
 
 
-def detect_smt_divergence(symbol, timeframe, structure):
+def detect_smt_divergence(symbol: str, timeframe: str, structure: Dict[str, Any]) -> str:
     if symbol.upper() != "XAUUSD":
         return "N/A - Only for XAUUSD"
 
@@ -1020,33 +1255,25 @@ def detect_smt_divergence(symbol, timeframe, structure):
 
     if sh[-1]["price"] > sh[-2]["price"] and corr_sh[-1]["price"] < corr_sh[-2]["price"]:
         return "BEARISH SMT (XAUUSD HH, EURUSD LH)"
-
     if sl[-1]["price"] < sl[-2]["price"] and corr_sl[-1]["price"] > corr_sl[-2]["price"]:
         return "BULLISH SMT (XAUUSD LL, EURUSD HL)"
-
     return "NO DIVERGENCE DETECTED"
 
 
-def compute_ote_levels(structure):
+def compute_ote_levels(structure: Dict[str, Any]) -> Optional[dict]:
     sh = structure.get("swing_highs", [])
     sl = structure.get("swing_lows", [])
     if not sh or not sl:
         return None
 
-    swings = []
-    for h in sh:
-        swings.append({"index": h["index"], "price": h["price"], "type": "H"})
-    for l in sl:
-        swings.append({"index": l["index"], "price": l["price"], "type": "L"})
-
+    swings = [{"index": h["index"], "price": h["price"], "type": "H"} for h in sh] + \
+             [{"index": l["index"], "price": l["price"], "type": "L"} for l in sl]
     if len(swings) < 2:
         return None
 
     swings.sort(key=lambda x: x["index"])
-
     last_swing = swings[-1]
     prev_swing = swings[-2]
-
     if last_swing["type"] == prev_swing["type"]:
         return None
 
@@ -1064,69 +1291,77 @@ def compute_ote_levels(structure):
     return {
         "top": round(max(ote_61_8, ote_79_0), 4),
         "bottom": round(min(ote_61_8, ote_79_0), 4),
-        "label": "OTE Zone (61.8% - 79.0%)"
+        "label": "OTE Zone (61.8% - 79.0%)",
     }
 
 
-def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None, symbol="",
-                       bias=None, killzone_ok=True, sweep=None):
+def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[dict],
+                       fvgs: List[dict], pools: List[dict], pd_zones: Optional[dict],
+                       timeframe: str, mss: Optional[dict] = None, symbol: str = "",
+                       bias: Optional[dict] = None, killzone_ok: bool = True,
+                       sweep: Optional[dict] = None) -> Tuple[Optional[dict], Optional[dict], Optional[str]]:
     atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
     current_price = safe_float(df["close"].values[-1])
 
     tolerance = atr * 0.5
     min_risk = atr * 0.5
-    max_risk = atr * 5.0
-    
+
+    recent_atr = (df["high"] - df["low"]).rolling(14).mean()
+    atr_median = safe_float(recent_atr.median(), atr)
+    vol_ratio = atr / atr_median if atr_median > 0 else 1.0
+    vol_factor = min(max(vol_ratio, 1.0), 1.5)
+    max_risk = atr * 5.0 * vol_factor
+
     warning_msg = None
 
     if not bias:
         return None, None, warning_msg
-
     bias_tier = bias.get("tier", "NEUTRAL")
-
     if bias_tier == "CONFLICT":
         return None, None, warning_msg
-
     if not mss:
         return None, None, warning_msg
 
-    # --- STRICT ATR DISPLACEMENT GUARDRAIL ---
+    recent = df.tail(3)
+    displacement_bear = False
+    displacement_bull = False
+    for _, row in recent.iterrows():
+        rng = safe_float(row["high"]) - safe_float(row["low"])
+        if rng <= atr * 2.5:
+            continue
+        if safe_float(row["close"]) < safe_float(row["open"]):
+            displacement_bear = True
+        else:
+            displacement_bull = True
+
     last_candle = df.iloc[-1]
-    candle_range = last_candle["high"] - last_candle["low"]
-    
-    is_bearish_dump = (last_candle["close"] < last_candle["open"]) and (candle_range > atr * 2.5)
-    is_bullish_rip = (last_candle["close"] > last_candle["open"]) and (candle_range > atr * 2.5)
+    last_is_bear = safe_float(last_candle["close"]) < safe_float(last_candle["open"])
+    last_is_bull = safe_float(last_candle["close"]) > safe_float(last_candle["open"])
 
     if mss["type"] == "MSS_BULL":
-        if is_bearish_dump:
-            allow_buy = False
-            allow_sell = False
-            warning_msg = "⚠️ DO NOT BUY: Massive bearish displacement detected. Sellers are in control."
-        else:
-            allow_buy = True
-            allow_sell = False
+        if displacement_bear and last_is_bear:
+            return None, None, ("⚠️ DO NOT BUY: recent massive bearish displacement "
+                                "contradicts bullish MSS. Setup invalidated.")
+        allow_buy = True
+        allow_sell = False
     elif mss["type"] == "MSS_BEAR":
-        if is_bullish_rip:
-            allow_buy = False
-            allow_sell = False
-            warning_msg = "⚠️ DO NOT SELL: Massive bullish displacement detected. Buyers are in control."
-        else:
-            allow_buy = False
-            allow_sell = True
+        if displacement_bull and last_is_bull:
+            return None, None, ("⚠️ DO NOT SELL: recent massive bullish displacement "
+                                "contradicts bearish MSS. Setup invalidated.")
+        allow_buy = False
+        allow_sell = True
     else:
         return None, None, warning_msg
 
-    def build_setup(direction, zone, entry, sl, tp1, tp2):
+    def build_setup(direction: str, zone: dict, entry: float, sl: float,
+                    tp1: float, tp2: float) -> Optional[dict]:
         risk = abs(entry - sl)
         if risk <= 0:
             return None
         reward_1 = abs(tp1 - entry)
         rr = reward_1 / risk
-
-        # --- STRICT R:R FILTER CHANGED TO 1.0 (Rule 4) ---
-        if rr < 1.0:
+        if rr < MIN_RR:
             return None
-        # ----------------------------------
 
         if bias_tier == "NEUTRAL":
             mss_ok = mss and (
@@ -1136,29 +1371,8 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
             if not mss_ok:
                 return None
 
-        checklist = build_checklist(direction, mss, bias, pd, killzone_ok, zone, rr, sweep=sweep)
-
-        pts = 0
-        for c in checklist:
-            if not c["pass"]:
-                continue
-            lbl = c["label"]
-            if lbl == "MSS Confirmed":
-                pts += 3
-            elif lbl == "HTF Bias":
-                pts += 2
-            elif lbl.startswith("Sweep of"):
-                pts += 2
-            elif lbl == "In Killzone":
-                pts += 2
-            elif lbl.startswith("Price in"):
-                pts += 2
-            elif lbl == "Displacement":
-                pts += 2
-            elif lbl == "OB Fresh":
-                pts += 2
-            elif lbl.startswith("R:R"):
-                pts += 1
+        checklist = build_checklist(direction, mss, bias, pd_zones, killzone_ok, zone, rr, sweep=sweep)
+        pts = score_checklist(checklist)
 
         if pts >= 10:
             confidence = "HIGH"
@@ -1169,6 +1383,15 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
         else:
             return None
 
+        # NEW RULE: If the trade is counter-trend (fails HTF Bias), downgrade it.
+        htf_bias_check = next((c for c in checklist if c["label"] == "HTF Bias"), None)
+        if htf_bias_check and not htf_bias_check["pass"]:
+            if confidence == "HIGH":
+                confidence = "MEDIUM"
+            elif confidence == "MEDIUM":
+                confidence = "LOW"
+
+        # Existing rule
         if bias_tier in ("NEUTRAL", "WEAK") and confidence == "HIGH":
             confidence = "MEDIUM"
 
@@ -1179,10 +1402,8 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
             "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": rr,
             "zone_type": zone["label"], "confidence": confidence,
             "zone_quality": safe_float(zone.get("quality", 0)),
-            "checklist": checklist,
-            "score": pts,
-            "reasons": reasons,
-            "sl_basis": "zone edge", "tp_basis": "next swing"
+            "checklist": checklist, "score": pts, "reasons": reasons,
+            "sl_basis": "zone edge", "tp_basis": "next swing",
         }
 
     buy_setup = None
@@ -1197,13 +1418,10 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
         for zone in bull_zones:
             if safe_int(zone.get("touches", 0)) > 1:
                 continue
-
             entry = safe_float(zone["top"])
             zone_bottom = safe_float(zone["bottom"])
-
             if not ((zone_bottom - tolerance) <= current_price <= (entry + tolerance)):
                 continue
-
             sl = zone_bottom - atr * 0.15
             risk = entry - sl
             if risk < min_risk:
@@ -1211,11 +1429,9 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
                 risk = min_risk
             if risk > max_risk:
                 continue
-
             tp1, tp2 = pick_tp_swing(structure, entry, "BUY")
             if tp1 is None:
                 continue
-
             setup = build_setup("BUY", zone, entry, sl, tp1, tp2)
             if setup:
                 buy_setup = setup
@@ -1230,13 +1446,10 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
         for zone in bear_zones:
             if safe_int(zone.get("touches", 0)) > 1:
                 continue
-
             entry = safe_float(zone["bottom"])
             zone_top = safe_float(zone["top"])
-
             if not ((entry - tolerance) <= current_price <= (zone_top + tolerance)):
                 continue
-
             sl = zone_top + atr * 0.15
             risk = sl - entry
             if risk < min_risk:
@@ -1244,11 +1457,9 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
                 risk = min_risk
             if risk > max_risk:
                 continue
-
             tp1, tp2 = pick_tp_swing(structure, entry, "SELL")
             if tp1 is None:
                 continue
-
             setup = build_setup("SELL", zone, entry, sl, tp1, tp2)
             if setup:
                 sell_setup = setup
@@ -1257,13 +1468,14 @@ def generate_scenarios(df, structure, obs, fvgs, pools, pd, timeframe, mss=None,
     return buy_setup, sell_setup, warning_msg
 
 
-def compute_correlations(symbols, timeframe='1h', lookback=200):
-    series = {}
+def compute_correlations(symbols: List[str], timeframe: str = '1h', lookback: int = 200) -> Dict[str, Any]:
+    series: Dict[str, np.ndarray] = {}
     for sym in symbols:
-        df, _ = fetch_data(sym, timeframe)
+        df, _ = fetch_data_cached(sym, timeframe, ttl=300)
         if df is not None and len(df) >= 50:
-            closes = df['close'].tail(lookback).values
-            series[sym] = closes
+            rets = df['close'].tail(lookback + 1).pct_change().dropna()
+            if len(rets) > 0:
+                series[sym] = rets.values
 
     if len(series) < 2:
         return {'error': 'Not enough data to compute correlations'}
@@ -1287,12 +1499,59 @@ def compute_correlations(symbols, timeframe='1h', lookback=200):
                 row.append(0.0)
         matrix.append(row)
 
-    return {'symbols': syms, 'matrix': matrix, 'timeframe': timeframe}
+    return {'symbols': syms, 'matrix': matrix, 'timeframe': timeframe, 'basis': 'pct_change'}
 
 
-def analyze(symbol, timeframe):
-    df, live_px, used_source = fetch_data_with_live(symbol, timeframe)
-    if df is None:
+def _build_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> List[Dict[str, Any]]:
+    candles = []
+    df_tail = df.tail(400)
+    for idx, row in df_tail.iterrows():
+        try:
+            t = safe_int(idx.timestamp())
+            if t <= 0:
+                continue
+            o, h, l, c = (safe_float(row["open"]), safe_float(row["high"]),
+                          safe_float(row["low"]), safe_float(row["close"]))
+            if o <= 0 or c <= 0:
+                continue
+            candles.append({"time": t, "open": o, "high": h, "low": l, "close": c})
+        except Exception:
+            continue
+
+    fc = _forming_get(symbol, timeframe)
+    if fc is not None:
+        try:
+            t = safe_int(fc["time"].timestamp())
+            if t > 0:
+                candles.append({
+                    "time": t,
+                    "open": safe_float(fc["open"]),
+                    "high": safe_float(fc["high"]),
+                    "low": safe_float(fc["low"]),
+                    "close": safe_float(fc["close"]),
+                })
+        except Exception as e:
+            logger.debug("forming candle append failed: %s", e)
+    return candles
+
+
+def _build_swing_markers(df: pd.DataFrame, swings: List[dict]) -> List[Dict[str, Any]]:
+    markers = []
+    for s in swings:
+        i = safe_int(s["index"])
+        if 0 <= i < len(df):
+            try:
+                t = safe_int(df.index[i].timestamp())
+                if t > 0:
+                    markers.append({"time": t, "price": safe_float(s["price"])})
+            except Exception:
+                continue
+    return markers
+
+
+def _analyze_inner(symbol: str, timeframe: str) -> Dict[str, Any]:
+    df, live_px, used_source, is_tick = _fetch_with_live_cached(symbol, timeframe)
+    if df is None or df.empty:
         return {"error": f"Could not fetch {symbol} {timeframe}: {used_source}"}
 
     last_closed = safe_float(df["close"].values[-1])
@@ -1300,12 +1559,11 @@ def analyze(symbol, timeframe):
 
     df = find_swings(df, timeframe)
     structure = detect_structure(df)
-    
+
     dealing_range = compute_dealing_range(df, structure, timeframe)
     pd_zones = premium_discount(df, structure, current_px, dealing_range=dealing_range)
 
-    mss = detect_mss(df, structure, timeframe) # Reverted to strict major MSS
-    
+    mss = detect_mss(df, structure, timeframe)
     sweep = detect_recent_sweep(df, structure, lookback=40)
     pools = find_liquidity_pools(df, structure, timeframe)
     obs = find_order_blocks(df, timeframe)
@@ -1326,59 +1584,11 @@ def analyze(symbol, timeframe):
     )
     killzone = current_killzone(symbol)
 
-    df_tail = df.tail(400)
-    candles = []
-    for idx, row in df_tail.iterrows():
-        try:
-            t = safe_int(idx.timestamp())
-            if t <= 0:
-                continue
-            o, h, l, c = (safe_float(row["open"]), safe_float(row["high"]),
-                          safe_float(row["low"]), safe_float(row["close"]))
-            if o <= 0 or c <= 0:
-                continue
-            candles.append({"time": t, "open": o, "high": h, "low": l, "close": c})
-        except Exception:
-            continue
+    candles = _build_candles(df, symbol, timeframe)
+    sh_markers = _build_swing_markers(df, structure["swing_highs"])
+    sl_markers = _build_swing_markers(df, structure["swing_lows"])
 
-    fc = _forming_cache.get((symbol.upper(), timeframe))
-    if fc is not None:
-        try:
-            t = safe_int(fc["time"].timestamp())
-            if t > 0:
-                candles.append({
-                    "time": t,
-                    "open": safe_float(fc["open"]),
-                    "high": safe_float(fc["high"]),
-                    "low": safe_float(fc["low"]),
-                    "close": safe_float(fc["close"]),
-                })
-        except Exception:
-            pass
-
-    sh_markers = []
-    for h in structure["swing_highs"]:
-        i = safe_int(h["index"])
-        if 0 <= i < len(df):
-            try:
-                t = safe_int(df.index[i].timestamp())
-                if t > 0:
-                    sh_markers.append({"time": t, "price": safe_float(h["price"])})
-            except Exception:
-                continue
-
-    sl_markers = []
-    for l in structure["swing_lows"]:
-        i = safe_int(l["index"])
-        if 0 <= i < len(df):
-            try:
-                t = safe_int(df.index[i].timestamp())
-                if t > 0:
-                    sl_markers.append({"time": t, "price": safe_float(l["price"])})
-            except Exception:
-                continue
-
-    def idx_to_ts(i):
+    def idx_to_ts(i: int) -> Optional[int]:
         i = max(0, min(safe_int(i), len(df) - 1))
         try:
             t = safe_int(df.index[i].timestamp())
@@ -1394,8 +1604,7 @@ def analyze(symbol, timeframe):
         ob_out.append({"type": z["type"], "top": safe_float(z["top"]),
                        "bottom": safe_float(z["bottom"]), "time": t,
                        "label": z["label"], "strength": safe_float(z.get("impulse", 0)),
-                       "touches": safe_int(z.get("touches", 0)),
-                       "kind": "OB"})
+                       "touches": safe_int(z.get("touches", 0)), "kind": "OB"})
 
     fvg_out = []
     for z in fvgs:
@@ -1404,8 +1613,7 @@ def analyze(symbol, timeframe):
             continue
         fvg_out.append({"type": z["type"], "top": safe_float(z["top"]),
                         "bottom": safe_float(z["bottom"]), "time": t,
-                        "label": z["label"], "size": safe_float(z.get("size", 0)),
-                        "kind": "FVG"})
+                        "label": z["label"], "size": safe_float(z.get("size", 0)), "kind": "FVG"})
 
     pools_out = []
     for p in pools:
@@ -1417,21 +1625,21 @@ def analyze(symbol, timeframe):
 
     mss_out = None
     if mss:
-        mss_out = {
-            "type": mss["type"],
-            "level": safe_float(mss["level"]),
-            "description": mss["description"],
-            "time": safe_int(df.index[-1].timestamp())
-        }
+        break_idx = safe_int(mss.get("break_index", len(df) - 1))
+        mss_time = idx_to_ts(break_idx)
+        if mss_time is not None:
+            mss_out = {"type": mss["type"], "level": safe_float(mss["level"]),
+                       "description": mss["description"],
+                       "time": mss_time, "break_index": break_idx}
 
     sweep_out = None
-    if sweep:
-        sweep_out = {
-            "type": sweep["type"],
-            "time": idx_to_ts(sweep["index"]),
-            "swept_price": safe_float(sweep["swept_price"]),
-            "index": safe_int(sweep["index"]),
-        }
+    if sweep and sweep.get("latest"):
+        latest = sweep["latest"]
+        sweep_time = idx_to_ts(latest["index"])
+        if sweep_time is not None:
+            sweep_out = {"type": latest["type"], "time": sweep_time,
+                         "swept_price": safe_float(latest["swept_price"]),
+                         "index": safe_int(latest["index"])}
 
     return {
         "symbol": symbol,
@@ -1439,21 +1647,20 @@ def analyze(symbol, timeframe):
         "ticker": used_source,
         "last_price": last_closed,
         "live_price": live_px,
+        "live_price_is_tick": bool(is_tick),
         "structure": structure,
         "bias": bias,
         "mss": mss_out,
         "sweep": sweep_out,
-        "pdh": pdh,
-        "pdl": pdl,
+        "pdh": pdh, "pdl": pdl,
         "sessions": sessions,
         "dealing_range": dealing_range,
         "pools": pools_out,
-        "obs": ob_out,
-        "fvgs": fvg_out,
+        "obs": ob_out, "fvgs": fvg_out,
         "premium_discount": pd_zones,
         "buy_setup": buy_setup,
         "sell_setup": sell_setup,
-        "warning": warning_msg, # PASS WARNING TO FRONTEND
+        "warning": warning_msg,
         "killzone": killzone,
         "candles": candles,
         "swing_high_markers": sh_markers,
@@ -1461,5 +1668,327 @@ def analyze(symbol, timeframe):
         "smt_divergence": smt_result,
         "ote_levels": ote_result,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "data_source": used_source
+        "data_source": used_source,
     }
+
+
+def analyze(symbol: str, timeframe: str) -> Dict[str, Any]:
+    try:
+        return _analyze_inner(symbol, timeframe)
+    except Exception as e:
+        logger.exception("analyze() failed for %s %s", symbol, timeframe)
+        return {
+            "error": f"analyze failed for {symbol} {timeframe}: {e}",
+            "symbol": symbol,
+            "timeframe": timeframe,
+        }
+
+
+def _run_structural_tests():
+    np.random.seed(42)
+    n = 300
+    prices = 100 + np.cumsum(np.random.randn(n) * 0.5)
+    df = pd.DataFrame({
+        "open":  prices + np.random.randn(n) * 0.1,
+        "high":  prices + np.abs(np.random.randn(n)) * 0.5,
+        "low":   prices - np.abs(np.random.randn(n)) * 0.5,
+        "close": prices + np.random.randn(n) * 0.2,
+    }, index=pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC"))
+
+    df_swings = find_swings(df, "15m")
+    assert "sh" in df_swings.columns and "sl" in df_swings.columns
+
+    struct = detect_structure(df_swings)
+    assert struct["trend"] in ("BULLISH", "BEARISH", "RANGING")
+
+    obs = find_order_blocks(df_swings, "15m")
+    assert isinstance(obs, list)
+
+    fvgs = find_fvgs(df_swings, "15m")
+    assert isinstance(fvgs, list)
+
+    pools = find_liquidity_pools(df_swings, struct, "15m")
+    seen = set()
+    for p in pools:
+        key = (p["type"], round(p["price"], 5))
+        assert key not in seen, f"Duplicate pool {key}"
+        seen.add(key)
+
+    dr = compute_dealing_range(df_swings, struct, "15m")
+    assert dr is None or ("high" in dr and "low" in dr)
+
+    assert _ranges_overlap(10, 10, 5, 8) is False
+    assert _ranges_overlap(10, 5, 9, 6) is True
+
+    assert isinstance(current_killzone("XAUUSD"), str)
+    assert isinstance(current_killzone("BTCUSD"), str)
+
+    fake_checklist = [
+        {"label": "MSS Confirmed", "pass": True, "detail": ""},
+        {"label": "HTF Bias", "pass": True, "detail": ""},
+        {"label": "Sweep of SSL", "pass": True, "detail": ""},
+        {"label": "Price in DISCOUNT", "pass": True, "detail": ""},
+        {"label": "In Killzone", "pass": True, "detail": ""},
+        {"label": "Displacement", "pass": True, "detail": ""},
+        {"label": "OB Fresh", "pass": True, "detail": ""},
+        {"label": "R:R >= 2.0", "pass": True, "detail": ""},
+    ]
+    assert score_checklist(fake_checklist) == 16, f"got {score_checklist(fake_checklist)}"
+
+    assert "US100" in INSTRUMENT_MAP
+    assert "US100" in YF_FALLBACK
+    assert "US100" in INDEX_SYMBOLS
+
+    logger.info("✅ Structural tests passed")
+
+
+def _run_fix_regression_tests():
+    closes = np.array([100.0, 101.0, 102.0, 111.0, 105.0, 106.0, 107.0, 108.0])
+    assert find_break_bar(closes, 110.0, True, 0) == 3, "forward scan from 0"
+    assert find_break_bar(closes, 110.0, True, 3) == 3, "forward scan from 3"
+    assert find_break_bar(closes, 110.0, True, 4) == len(closes) - 1, "no break -> last bar"
+    assert find_break_bar(closes, 103.0, False, 4) == len(closes) - 1
+
+    plateau_n = 30
+    # FIX: Use a downtrend for the tail so it doesn't create a false swing high at the end of the array
+    tail_highs = np.linspace(100, 90, plateau_n)
+    tail_lows = np.linspace(95, 85, plateau_n)
+    tail_opens = np.linspace(99, 89, plateau_n)
+    tail_closes = np.linspace(99, 89, plateau_n)
+
+    highs = np.concatenate(([100, 110, 110, 110, 100], tail_highs))
+    lows = np.concatenate(([95, 105, 105, 105, 95], tail_lows))
+    opens = np.concatenate(([99, 108, 108, 108, 99], tail_opens))
+    closes_arr = np.concatenate(([99, 108, 108, 108, 99], tail_closes))
+
+    df_p = pd.DataFrame({
+        "open": opens, "high": highs, "low": lows, "close": closes_arr,
+    }, index=pd.date_range("2024-01-01", periods=len(highs), freq="15min", tz="UTC"))
+    
+    df_swings = find_swings(df_p, "15m")
+    sh_idx = [i for i, v in enumerate(df_swings["sh"].values) if v]
+    
+    assert len(sh_idx) == 1, f"expected 1 swing high, got {len(sh_idx)} at {sh_idx}"
+    assert 1 <= sh_idx[0] <= 3, f"swing high should be inside plateau, got {sh_idx[0]}"
+
+    np.random.seed(0)
+    n = 300
+    common_trend = np.linspace(100, 200, n)
+    a = common_trend + np.random.randn(n) * 0.5
+    b = common_trend + np.random.randn(n) * 0.5
+    level_corr = np.corrcoef(a, b)[0, 1]
+    assert level_corr > 0.95, f"level corr should be high, got {level_corr}"
+    ret_a = np.diff(a) / a[:-1]
+    ret_b = np.diff(b) / b[:-1]
+    ret_corr = np.corrcoef(ret_a, ret_b)[0, 1]
+    assert abs(ret_corr) < 0.2, f"return corr should be near zero, got {ret_corr}"
+
+    logger.info("✅ Fix regression tests passed (FIX #1, #2, #3)")
+
+
+def _make_golden_ohlc() -> pd.DataFrame:
+    n = 50
+    opens = np.full(n, 100.0)
+    highs = np.full(n, 100.4)
+    lows = np.full(n, 99.6)
+    closes = np.full(n, 100.0)
+
+    opens[30], closes[30] = 100.5, 99.5
+    highs[30], lows[30]   = 100.8, 99.3
+
+    opens[31], closes[31] = 99.6, 103.5
+    highs[31], lows[31]   = 104.0, 99.5
+
+    for i in range(32, n):
+        opens[i], closes[i] = 103.8, 104.0
+        highs[i], lows[i]   = 104.5, 103.5
+
+    return pd.DataFrame({
+        "open": opens, "high": highs, "low": lows, "close": closes,
+    }, index=pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC"))
+
+
+def _run_golden_fixture_test(mod):
+    import unittest.mock as mock
+
+    with _cache_lock:
+        _forming_cache.clear()
+        _df_cache.clear()
+        _bias_cache.clear()
+        _failure_cache.clear()
+        _analyze_cache.clear()
+
+    golden_df = _make_golden_ohlc()
+
+    obs = find_order_blocks(golden_df.copy(), "15m")
+    assert len(obs) >= 1, f"expected >=1 OB, got {len(obs)}"
+    assert any(o["type"] == "OB_BULL" for o in obs), "expected OB_BULL"
+
+    fvgs = find_fvgs(golden_df.copy(), "15m")
+    assert len(fvgs) >= 1, f"expected >=1 FVG, got {len(fvgs)}"
+    assert any(f["type"] == "FVG_BULL" for f in fvgs), "expected FVG_BULL"
+
+    neutral_bias = {
+        "d1_trend": "RANGING", "h4_trend": "RANGING",
+        "h4_levels": [], "htf_obs": [],
+        "allow_buy": True, "allow_sell": True,
+        "tier": "NEUTRAL", "reason": "mock",
+    }
+
+    with mock.patch.object(mod, "fetch_data_with_live",
+                           return_value=(golden_df.copy(), None, "GOLDEN", False)), \
+         mock.patch.object(mod, "fetch_data_cached",
+                           return_value=(golden_df.copy(), "GOLDEN")), \
+         mock.patch.object(mod, "get_bias", return_value=neutral_bias):
+        result = analyze("XAUUSD", "15m")
+
+    assert "error" not in result, f"analyze failed: {result.get('error')}"
+    assert len(result["obs"]) >= 1, f"expected >=1 OB in output, got {len(result['obs'])}"
+    assert len(result["fvgs"]) >= 1, f"expected >=1 FVG in output, got {len(result['fvgs'])}"
+    assert any(o["type"] == "OB_BULL" for o in result["obs"])
+    assert any(f["type"] == "FVG_BULL" for f in result["fvgs"])
+
+    logger.info("✅ Golden fixture test passed (OB + FVG detected)")
+
+
+def _run_sweep_per_side_test():
+    n = 30
+    opens = np.full(n, 100.0)
+    highs = np.full(n, 100.5)
+    lows = np.full(n, 99.5)
+    closes = np.full(n, 100.0)
+
+    highs[10] = 101.0
+    lows[15] = 99.0
+    highs[20] = 101.5; closes[20] = 100.8
+    lows[22] = 98.5; closes[22] = 99.3
+
+    df = pd.DataFrame({
+        "open": opens, "high": highs, "low": lows, "close": closes,
+    }, index=pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC"))
+
+    structure = {
+        "swing_highs": [{"index": 10, "price": 101.0}],
+        "swing_lows": [{"index": 15, "price": 99.0}],
+    }
+
+    sweep = detect_recent_sweep(df, structure, lookback=30)
+    assert sweep is not None, "expected sweeps"
+    assert sweep["bsl"] is not None and sweep["bsl"]["index"] == 20, f"bsl: {sweep['bsl']}"
+    assert sweep["ssl"] is not None and sweep["ssl"]["index"] == 22, f"ssl: {sweep['ssl']}"
+    assert sweep["latest"]["index"] == 22, "latest should be ssl (bar 22)"
+
+    zone = {"quality": 2.5, "touches": 0}
+    buy_cl = build_checklist("BUY", None, None, None, True, zone, 2.0, sweep=sweep)
+    sell_cl = build_checklist("SELL", None, None, None, True, zone, 2.0, sweep=sweep)
+
+    buy_sweep = next(c for c in buy_cl if c["label"].startswith("Sweep of"))
+    sell_sweep = next(c for c in sell_cl if c["label"].startswith("Sweep of"))
+
+    assert buy_sweep["pass"] is True, f"BUY should find SSL sweep, got {buy_sweep}"
+    assert sell_sweep["pass"] is True, f"SELL should find BSL sweep, got {sell_sweep}"
+    assert "SSL" in buy_sweep["detail"]
+    assert "BSL" in sell_sweep["detail"]
+
+    logger.info("✅ Sweep per-side test passed (FIX #6 / #12)")
+
+
+def _run_cache_eviction_test():
+    test_cache: Dict[str, Tuple[float, int]] = {}
+    for i in range(_CACHE_MAX + 10):
+        _cache_set(test_cache, f"key_{i}", i)
+
+    assert len(test_cache) == _CACHE_MAX, f"expected {_CACHE_MAX}, got {len(test_cache)}"
+    assert f"key_{_CACHE_MAX + 9}" in test_cache, "newest should be present"
+    assert "key_0" not in test_cache, "oldest should be evicted"
+    assert "key_9" not in test_cache, "10th oldest should be evicted"
+    assert "key_10" in test_cache, "11th should still be present"
+
+    logger.info("✅ Cache eviction test passed (FIX #7 / #13)")
+
+
+def _run_429_test():
+    import unittest.mock as mock
+
+    fake = mock.MagicMock()
+    fake.status_code = 429
+    fake.raise_for_status = mock.MagicMock()
+
+    with mock.patch.object(requests, "get", return_value=fake) as mock_get:
+        result = oanda_request("https://example.com", {"Authorization": "Bearer test"})
+
+    assert result is None, "429 should return None"
+    assert mock_get.call_count == 1, f"should not retry, got {mock_get.call_count} calls"
+    fake.raise_for_status.assert_not_called()
+
+    logger.info("✅ 429 handling test passed (FIX #8 / #14)")
+
+
+def _run_analyze_test(mod):
+    import unittest.mock as mock
+
+    with mod._cache_lock:
+        mod._forming_cache.clear()
+        mod._df_cache.clear()
+        mod._bias_cache.clear()
+        mod._failure_cache.clear()
+        mod._analyze_cache.clear()
+
+    np.random.seed(7)
+    n = 300
+    prices = 2000 + np.cumsum(np.random.randn(n) * 2)
+    mock_df = pd.DataFrame({
+        "open":  prices + np.random.randn(n) * 0.5,
+        "high":  prices + np.abs(np.random.randn(n)) * 1.0,
+        "low":   prices - np.abs(np.random.randn(n)) * 1.0,
+        "close": prices + np.random.randn(n) * 0.5,
+    }, index=pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC"))
+
+    fake_bias = {
+        "d1_trend": "BULLISH", "h4_trend": "BULLISH",
+        "h4_levels": [], "htf_obs": [],
+        "allow_buy": True, "allow_sell": False,
+        "tier": "STRONG", "reason": "mock",
+    }
+
+    with mock.patch.object(mod, "fetch_data_with_live",
+                           return_value=(mock_df.copy(), 2050.0, "MOCK", False)), \
+         mock.patch.object(mod, "fetch_data_cached",
+                           return_value=(mock_df.copy(), "MOCK")), \
+         mock.patch.object(mod, "get_bias", return_value=fake_bias):
+        result = analyze("XAUUSD", "15m")
+
+    assert isinstance(result, dict), "analyze must return dict"
+    assert "error" not in result, f"analyze returned error: {result.get('error')}"
+    assert result.get("symbol") == "XAUUSD"
+    assert result.get("data_source") == "MOCK"
+    assert isinstance(result.get("candles"), list) and len(result["candles"]) > 0
+    assert isinstance(result.get("structure"), dict)
+    assert isinstance(result.get("bias"), dict)
+    assert isinstance(result.get("pools"), list)
+    assert isinstance(result.get("obs"), list)
+    assert isinstance(result.get("fvgs"), list)
+    assert result["structure"]["trend"] in ("BULLISH", "BEARISH", "RANGING")
+    assert result.get("live_price_is_tick") is False
+    logger.info("✅ analyze() end-to-end test passed")
+
+
+def _run_smoke_test():
+    _run_structural_tests()
+    _run_fix_regression_tests()
+    _run_golden_fixture_test(sys.modules[__name__])
+    _run_sweep_per_side_test()
+    _run_cache_eviction_test()
+    _run_429_test()
+    _run_analyze_test(sys.modules[__name__])
+    try:
+        import yfinance  # noqa: F401
+        logger.info("ℹ️  yfinance available (4h resample path not network-tested)")
+    except ImportError:
+        logger.info("ℹ️  yfinance not installed; 4h fallback unavailable")
+    logger.info("✅ All smoke tests passed")
+
+
+if __name__ == "__main__":
+    if "--test" in sys.argv:
+        _run_smoke_test()

@@ -1,6 +1,7 @@
 """
 CRT (Candle Range Theory) Engine — separate from ICT scanner.
 Detects 3-candle patterns: C1 (range) → C2 (sweep) → C3 (distribution).
+UPDATED: Fixed 4-value unpacking and enforced 1:2 R:R math.
 """
 import os
 import sys
@@ -92,11 +93,15 @@ def detect_crt_patterns(df, timeframe="15m", lookback=20):
         if bull_sweep and bull_c3 and bull_disp:
             entry = c3_close
             sl    = c2_low - atr_v * 0.3
-            tp1   = c1_high
-            tp2   = c1_high + c1_range * 0.5
             risk  = entry - sl
+            
+            # Force TP to be a 1:2 R:R expansion
+            tp1   = entry + (risk * 2.0)
+            tp2   = entry + (risk * 3.0)
+            
             rr1   = (tp1 - entry) / risk if risk > 0 else 0
-            if rr1 >= 1.5:
+            
+            if rr1 >= 2.0:
                 patterns.append({
                     "type": "CRT_BULL",
                     "direction": "BUY",
@@ -120,11 +125,15 @@ def detect_crt_patterns(df, timeframe="15m", lookback=20):
         if bear_sweep and bear_c3 and bear_disp:
             entry = c3_close
             sl    = c2_high + atr_v * 0.3
-            tp1   = c1_low
-            tp2   = c1_low - c1_range * 0.5
             risk  = sl - entry
+            
+            # Force TP to be a 1:2 R:R expansion
+            tp1   = entry - (risk * 2.0)
+            tp2   = entry - (risk * 3.0)
+            
             rr1   = (entry - tp1) / risk if risk > 0 else 0
-            if rr1 >= 1.5:
+            
+            if rr1 >= 2.0:
                 patterns.append({
                     "type": "CRT_BEAR",
                     "direction": "SELL",
@@ -181,7 +190,9 @@ def _build_checklist(pattern, bias, killzone_ok, killzone):
 
 
 def analyze(symbol, timeframe="15m"):
-    df, live_px, src = scanner_engine.fetch_data_with_live(symbol, timeframe)
+    # FIX APPLIED: Added the 4th variable (_) to prevent the crash
+    df, live_px, src, _ = scanner_engine.fetch_data_with_live(symbol, timeframe)
+    
     if df is None:
         return {"error": f"Could not fetch {symbol} {timeframe}: {src}"}
 

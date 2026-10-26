@@ -221,11 +221,11 @@ def api_game_round():
         symbol = random.choice(GAME_SYMBOLS)
         timeframe = random.choice(GAME_TIMEFRAMES)
 
-        df, live_px, src = scanner_engine.fetch_data_with_live(symbol, timeframe)
+        df, live_px, src, _ = scanner_engine.fetch_data_with_live(symbol, timeframe)
         if df is None or len(df) < 230:
             # Retry once with a different symbol if data is thin
             symbol = 'XAUUSD'
-            df, live_px, src = scanner_engine.fetch_data_with_live(symbol, '1h')
+            df, live_px, src, _ = scanner_engine.fetch_data_with_live(symbol, '1h')
             if df is None or len(df) < 230:
                 return jsonify({"error": "Not enough historical data"})
 

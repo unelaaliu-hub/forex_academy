@@ -1278,8 +1278,8 @@ function buildSetupResult(data, mode, target, dir, isChase, isPrePlan) {
   const rr1 = reward1 / risk;
   const rr2 = reward2 / risk;
 
-  // --- STRICT R:R FILTER FOR UI PLANNED BOXES (CHANGED TO 1.0) ---
-  if (rr1 < 1.0) return null;
+  // --- STRICT R:R FILTER FOR UI PLANNED BOXES (CHANGED TO 2.0) ---
+  if (rr1 < 2.0) return null;
   // --------------------------------------------------------------
 
   if (!showCounterTrend) {
