@@ -288,7 +288,7 @@
     {% endif %}
 
     <div id="displacementWarning" class="displacement-banner">
-      <div class="alert-icon">🛑</div>
+      <div class="alert-icon">🚨</div>
       <div class="alert-text" id="displacementText"></div>
     </div>
 
@@ -1278,9 +1278,7 @@ function buildSetupResult(data, mode, target, dir, isChase, isPrePlan) {
   const rr1 = reward1 / risk;
   const rr2 = reward2 / risk;
 
-  // --- STRICT R:R FILTER FOR UI PLANNED BOXES (CHANGED TO 2.0) ---
   if (rr1 < 2.0) return null;
-  // --------------------------------------------------------------
 
   if (!showCounterTrend) {
     if (data.premium_discount && data.premium_discount.position) {
@@ -1399,10 +1397,30 @@ function computePrePlan(data, mode) {
   return buildSetupResult(data, mode, target, dir, false, true);
 }
 
+function renderPreMssBox(p) {
+  const isBuy = p.direction === 'BUY';
+  const dirColor = isBuy ? 'var(--green)' : 'var(--red)';
+  const dirLabel = isBuy ? '▼ BUY' : '▲ SELL';
+  const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);
+
+  let html = `<div class="planned-box" style="border-color: #fbbf24; background: rgba(251, 191, 36, 0.15); margin-bottom: 12px;">`;
+  html += `<div class="planned-title" style="color: #fbbf24;">⚡ PRE-MSS SWEEP (HIGH RISK)</div>`;
+  html += `<div class="planned-sub">${dirLabel} <span style="color:var(--muted);">from Sweep</span><br><span style="color:var(--gold);">Early Entry Alert</span></div>`;
+  html += '<div class="planned-grid">';
+  html += `<div class="planned-cell"><div class="lbl">ENTRY</div><div class="val" style="color:${dirColor};">${px(p.entry)}</div></div>`;
+  html += `<div class="planned-cell"><div class="lbl">SL</div><div class="val" style="color:var(--red);">${px(p.sl)}</div></div>`;
+  html += `<div class="planned-cell"><div class="lbl">TP1</div><div class="val" style="color:var(--green);">${px(p.tp1)}</div></div>`;
+  html += `<div class="planned-cell"><div class="lbl">TP2</div><div class="val" style="color:var(--green);">${px(p.tp2)}</div></div>`;
+  html += '</div>';
+  html += `<div class="planned-rr">R:R TP1 = 1 : <span style="color:var(--green);">${p.rr.toFixed(2)}</span></div>`;
+  html += '</div>';
+  return html;
+}
+
 function renderPlannedBox(p, mode, forceChase) {
   const isBuy = p.direction === 'BUY';
   const dirColor = isBuy ? 'var(--green)' : 'var(--red)';
-  const dirLabel = isBuy ? '▼ BUY' : '▼ SELL';
+  const dirLabel = isBuy ? '▼ BUY' : '▲ SELL';
   const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);
   const distTxt = p.inZone
     ? '<span style="color:var(--green); font-weight:600;">✅ PRICE IN ZONE</span>'
@@ -1592,6 +1610,17 @@ function updateSetupPanel(data) {
     html += '<b style="color:var(--cyan);">📋 TRADE PLAN:</b> Wait for price to reach the Order Block. Once it is in the zone, wait for the MSS to fire, then take the trade with the specified SL and TP. Do not enter early.';
     html += '</div>';
 
+    if (data.pre_mss_buy) {
+        html += '<div class="planned-stack" style="margin-top:12px;">';
+        html += renderPreMssBox(data.pre_mss_buy);
+        html += '</div>';
+    }
+    if (data.pre_mss_sell) {
+        html += '<div class="planned-stack" style="margin-top:12px;">';
+        html += renderPreMssBox(data.pre_mss_sell);
+        html += '</div>';
+    }
+
     const preAgg = computePrePlan(data, 'aggressive');
     if (preAgg) {
       const obRange = preAgg.zoneLabel.includes('OB') ? `${preAgg.zoneLabel} (${preAgg.targetBottom.toFixed(2)} — ${preAgg.targetTop.toFixed(2)})` : preAgg.zoneLabel;
@@ -1639,7 +1668,7 @@ function updateSetupPanel(data) {
 
   const isBuy = engineSetup.direction === 'BUY';
   panel.className = 'setup-panel ' + (isBuy ? 'buy' : 'sell');
-  dirEl.textContent = (isBuy ? '▼ BUY' : '▼ SELL') + ' | ' + engineSetup.confidence;
+  dirEl.textContent = (isBuy ? '▼ BUY' : '▲ SELL') + ' | ' + engineSetup.confidence;
   rrEl.textContent = 'R:R 1 : ' + engineSetup.rr.toFixed(2);
 
   const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);

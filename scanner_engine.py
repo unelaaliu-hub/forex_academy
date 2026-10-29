@@ -5,6 +5,9 @@ REVISION 3 (V5 final pass) + USER CUSTOMIZATIONS:
   # USER CUSTOM 1 — Hardcoded OANDA API Key.
   # USER CUSTOM 2 — MIN_RR set to 2.0 (strict 1:2 R:R).
   # USER CUSTOM 3 — Weekend check added to killzone logic.
+  # USER CUSTOM 4 — Telegram Alert Integration.
+  # USER CUSTOM 5 — Telegram now alerts on ALL planned setups (even if price is not in zone).
+  # USER CUSTOM 6 — Added PRE-MSS SWEEP alerts for early entries.
   # FIX #1  — find_break_bar scans FORWARD from the swing, not backward.
   # FIX #2  — find_swings marks all plateau bars, dedupes to median.
   # FIX #3  — compute_correlations uses pct_change (returns).
@@ -20,6 +23,7 @@ REVISION 3 (V5 final pass) + USER CUSTOMIZATIONS:
   # FIX #14 — 429 handling test.
   # FIX #15 — Three-state sweep detail in checklist.
   # FIX #16 — Counter-trend downgrade (limits confidence to LOW/MEDIUM).
+  # FIX #17 — Added Data Sanity Check for XAUUSD to prevent fake Yahoo prices.
 """
 import os
 import sys
@@ -49,6 +53,33 @@ OANDA_API_KEY = "7601c3626d13d6a4cbcc8a96a91b01aa-9e0a98d2f5cba0b6e3d2a5905c61e9
 OANDA_BASE_URL = "https://api-fxpractice.oanda.com"
 
 OANDA_INSECURE_RETRY = os.environ.get("OANDA_INSECURE_RETRY", "0").strip() == "1"
+
+# TELEGRAM CONFIG
+TELEGRAM_BOT_TOKEN = "9178114200:AAFiPUmLQwh2u2TAujibEtD53-1mkAfkg4s"
+TELEGRAM_CHAT_ID = "7475843376" 
+TELEGRAM_ENABLED = True
+
+_sent_alerts = set()
+_alert_lock = threading.Lock()
+
+def fmt_price(price: float) -> str:
+    if price > 500:
+        return f"{price:.2f}"
+    return f"{price:.5f}"
+
+def send_telegram_alert(message: str):
+    if not TELEGRAM_ENABLED or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        requests.post(url, json=payload, timeout=3)
+    except Exception as e:
+        logger.debug(f"Telegram alert failed: {e}")
 
 # STRICT 1:2 R:R
 MIN_RR = 2.0
@@ -369,7 +400,11 @@ def fetch_from_yahoo(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame
 def fetch_data_with_live(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], Optional[float], str, bool]:
     df, live_px, src = fetch_from_oanda(symbol, timeframe)
     if df is not None:
-        return df, live_px, src, bool(live_px and live_px > 0)
+        # SANITY CHECK: Reject corrupted OANDA data for Gold
+        if symbol.upper() == "XAUUSD" and safe_float(df["close"].values[-1]) < 1000:
+            logger.warning("Corrupted OANDA data for XAUUSD. Rejecting.")
+        else:
+            return df, live_px, src, bool(live_px and live_px > 0)
 
     if symbol.upper() in INDEX_SYMBOLS:
         return None, None, "OANDA failed (Market Closed or Wrong Ticker)", False
@@ -377,6 +412,12 @@ def fetch_data_with_live(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataF
     df2, _, src2 = fetch_from_yahoo(symbol, timeframe)
     if df2 is not None:
         last_close = safe_float(df2["close"].values[-1])
+        
+        # SANITY CHECK: Reject corrupted YAHOO data for Gold
+        if symbol.upper() == "XAUUSD" and last_close < 1000:
+            logger.warning("Corrupted YAHOO data for XAUUSD. Rejecting.")
+            return None, None, "Corrupted Data (Price < 1000)", False
+            
         return df2, last_close, src2, False
     return None, None, f"{src} / {src2}", False
 
@@ -1191,7 +1232,7 @@ def build_checklist(direction: str, mss: Optional[dict], bias: Optional[dict],
     sweep_label = "Sweep of SSL" if direction == "BUY" else "Sweep of BSL"
     if sweep_match:
         side = "SSL" if sweep_match["type"] == "SSL_SWEEP" else "BSL"
-        sweep_detail = f"{side} @ {sweep_match['swept_price']:.2f}"
+        sweep_detail = f"{side} @ {fmt_price(sweep_match['swept_price'])}"
     elif sweep_wrong:
         side = "SSL" if sweep_wrong["type"] == "SSL_SWEEP" else "BSL"
         sweep_detail = f"{side} only — wrong side for {direction}"
@@ -1299,7 +1340,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                        fvgs: List[dict], pools: List[dict], pd_zones: Optional[dict],
                        timeframe: str, mss: Optional[dict] = None, symbol: str = "",
                        bias: Optional[dict] = None, killzone_ok: bool = True,
-                       sweep: Optional[dict] = None) -> Tuple[Optional[dict], Optional[dict], Optional[str]]:
+                       sweep: Optional[dict] = None) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[str]]:
     atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
     current_price = safe_float(df["close"].values[-1])
 
@@ -1314,13 +1355,25 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
 
     warning_msg = None
 
-    if not bias:
-        return None, None, warning_msg
+    if not bias or not mss:
+        return None, None, None, None, None, None, warning_msg
+
     bias_tier = bias.get("tier", "NEUTRAL")
-    if bias_tier == "CONFLICT":
-        return None, None, warning_msg
-    if not mss:
-        return None, None, warning_msg
+
+    # Pre-MSS Setup Logic
+    pre_mss_buy, pre_mss_sell = None, None
+    if sweep and sweep.get("latest"):
+        latest = sweep["latest"]
+        if latest["type"] == "SSL_SWEEP" and bias.get("allow_buy"):
+            sl = latest["swept_price"] - (atr * 0.3)
+            risk = current_price - sl
+            if risk > 0:
+                pre_mss_buy = {"direction": "BUY", "entry": current_price, "sl": sl, "tp1": current_price + risk * 2.0, "tp2": current_price + risk * 3.0, "rr": 2.0, "zone_type": "PRE-MSS SWEEP", "confidence": "EARLY ENTRY", "zone_quality": 0, "checklist": [], "score": 0, "reasons": [], "sl_basis": "sweep wick", "tp_basis": "fixed 1:2"}
+        elif latest["type"] == "BSL_SWEEP" and bias.get("allow_sell"):
+            sl = latest["swept_price"] + (atr * 0.3)
+            risk = sl - current_price
+            if risk > 0:
+                pre_mss_sell = {"direction": "SELL", "entry": current_price, "sl": sl, "tp1": current_price - risk * 2.0, "tp2": current_price - risk * 3.0, "rr": 2.0, "zone_type": "PRE-MSS SWEEP", "confidence": "EARLY ENTRY", "zone_quality": 0, "checklist": [], "score": 0, "reasons": [], "sl_basis": "sweep wick", "tp_basis": "fixed 1:2"}
 
     recent = df.tail(3)
     displacement_bear = False
@@ -1340,18 +1393,18 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
 
     if mss["type"] == "MSS_BULL":
         if displacement_bear and last_is_bear:
-            return None, None, ("⚠️ DO NOT BUY: recent massive bearish displacement "
+            return None, None, None, None, pre_mss_buy, pre_mss_sell, ("⚠️ DO NOT BUY: recent massive bearish displacement "
                                 "contradicts bullish MSS. Setup invalidated.")
         allow_buy = True
         allow_sell = False
     elif mss["type"] == "MSS_BEAR":
         if displacement_bull and last_is_bull:
-            return None, None, ("⚠️ DO NOT SELL: recent massive bullish displacement "
+            return None, None, None, None, pre_mss_buy, pre_mss_sell, ("⚠️ DO NOT SELL: recent massive bullish displacement "
                                 "contradicts bearish MSS. Setup invalidated.")
         allow_buy = False
         allow_sell = True
     else:
-        return None, None, warning_msg
+        return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
 
     def build_setup(direction: str, zone: dict, entry: float, sl: float,
                     tp1: float, tp2: float) -> Optional[dict]:
@@ -1383,7 +1436,6 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
         else:
             return None
 
-        # NEW RULE: If the trade is counter-trend (fails HTF Bias), downgrade it.
         htf_bias_check = next((c for c in checklist if c["label"] == "HTF Bias"), None)
         if htf_bias_check and not htf_bias_check["pass"]:
             if confidence == "HIGH":
@@ -1391,9 +1443,11 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             elif confidence == "MEDIUM":
                 confidence = "LOW"
 
-        # Existing rule
         if bias_tier in ("NEUTRAL", "WEAK") and confidence == "HIGH":
             confidence = "MEDIUM"
+
+        if bias_tier == "CONFLICT":
+            confidence = "LOW"
 
         reasons = [f"{'✅' if c['pass'] else '⚠️'} {c['label']} — {c['detail']}" for c in checklist]
 
@@ -1408,6 +1462,8 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
 
     buy_setup = None
     sell_setup = None
+    planned_buy = None
+    planned_sell = None
 
     if allow_buy:
         bull_zones = sorted(
@@ -1420,8 +1476,6 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                 continue
             entry = safe_float(zone["top"])
             zone_bottom = safe_float(zone["bottom"])
-            if not ((zone_bottom - tolerance) <= current_price <= (entry + tolerance)):
-                continue
             sl = zone_bottom - atr * 0.15
             risk = entry - sl
             if risk < min_risk:
@@ -1434,8 +1488,12 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                 continue
             setup = build_setup("BUY", zone, entry, sl, tp1, tp2)
             if setup:
-                buy_setup = setup
-                break
+                if planned_buy is None:
+                    planned_buy = setup
+                
+                if ((zone_bottom - tolerance) <= current_price <= (entry + tolerance)):
+                    buy_setup = setup
+                    break
 
     if allow_sell:
         bear_zones = sorted(
@@ -1448,8 +1506,6 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                 continue
             entry = safe_float(zone["bottom"])
             zone_top = safe_float(zone["top"])
-            if not ((entry - tolerance) <= current_price <= (zone_top + tolerance)):
-                continue
             sl = zone_top + atr * 0.15
             risk = sl - entry
             if risk < min_risk:
@@ -1462,10 +1518,14 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                 continue
             setup = build_setup("SELL", zone, entry, sl, tp1, tp2)
             if setup:
-                sell_setup = setup
-                break
+                if planned_sell is None:
+                    planned_sell = setup
+                
+                if ((entry - tolerance) <= current_price <= (zone_top + tolerance)):
+                    sell_setup = setup
+                    break
 
-    return buy_setup, sell_setup, warning_msg
+    return buy_setup, sell_setup, planned_buy, planned_sell, pre_mss_buy, pre_mss_sell, warning_msg
 
 
 def compute_correlations(symbols: List[str], timeframe: str = '1h', lookback: int = 200) -> Dict[str, Any]:
@@ -1578,7 +1638,7 @@ def _analyze_inner(symbol: str, timeframe: str) -> Dict[str, Any]:
     smt_result = detect_smt_divergence(symbol, timeframe, structure)
     ote_result = compute_ote_levels(structure)
 
-    buy_setup, sell_setup, warning_msg = generate_scenarios(
+    buy_setup, sell_setup, planned_buy, planned_sell, pre_mss_buy, pre_mss_sell, warning_msg = generate_scenarios(
         df, structure, obs, fvgs, pools, pd_zones, timeframe, mss,
         symbol=symbol, bias=bias, killzone_ok=killzone_ok, sweep=sweep
     )
@@ -1641,6 +1701,52 @@ def _analyze_inner(symbol: str, timeframe: str) -> Dict[str, Any]:
                          "swept_price": safe_float(latest["swept_price"]),
                          "index": safe_int(latest["index"])}
 
+    # ---------- TELEGRAM ALERTS ----------
+    with _alert_lock:
+        if len(_sent_alerts) > 1000:
+            _sent_alerts.clear()
+
+        # 1. Pre-MSS Alerts
+        for setup in [pre_mss_buy, pre_mss_sell]:
+            if setup:
+                alert_key = f"{symbol}_pre_mss_{setup['direction']}_{setup['entry']:.2f}"
+                if alert_key not in _sent_alerts:
+                    _sent_alerts.add(alert_key)
+                    emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
+                    send_telegram_alert(f"⚡ *{symbol} - {emoji} PRE-MSS SWEEP* ⚡\n\nEntry: {fmt_price(setup['entry'])}\nSL: {fmt_price(setup['sl'])}\nTP1: {fmt_price(setup['tp1'])}\nR:R: 1 : 2.00\n\n⚠️ _EARLY ENTRY. High Risk. Wait for MSS if unsure._\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']})")
+
+        # 2. MSS Alert
+        if mss_out:
+            alert_key = f"{symbol}_mss_{mss_out['break_index']}_{mss_out['type']}"
+            if alert_key not in _sent_alerts:
+                _sent_alerts.add(alert_key)
+                send_telegram_alert(f"🚨 *{symbol} - {mss_out['type']}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']})\nSession: {killzone}\n\n👉 _Open scanner to check for setup._")
+
+        # 3. Planned / Active Setup Alert
+        for setup in [buy_setup, sell_setup, planned_buy, planned_sell]:
+            if setup:
+                alert_key = f"{symbol}_{setup['direction']}_{setup['entry']:.2f}"
+                if alert_key not in _sent_alerts:
+                    _sent_alerts.add(alert_key)
+                    
+                    status_label = setup["confidence"]
+                    if bias['tier'] == "CONFLICT":
+                        status_label = "CONFLICT (DO NOT TRADE)"
+                    elif status_label == "LOW":
+                        status_label = "WAITING (DO NOT TRADE)"
+                        
+                    direction_emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
+                    setup_msg = (
+                        f"🎯 *{symbol} - {direction_emoji} PLAN* ({status_label})\n\n"
+                        f"Entry: {fmt_price(setup['entry'])}\n"
+                        f"SL: {fmt_price(setup['sl'])}\n"
+                        f"TP1: {fmt_price(setup['tp1'])}\n"
+                        f"R:R: 1 : {setup['rr']:.2f}\n\n"
+                        f"Zone: {setup['zone_type']}\n"
+                        f"Bias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']})"
+                    )
+                    send_telegram_alert(setup_msg)
+
     return {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -1660,6 +1766,8 @@ def _analyze_inner(symbol: str, timeframe: str) -> Dict[str, Any]:
         "premium_discount": pd_zones,
         "buy_setup": buy_setup,
         "sell_setup": sell_setup,
+        "pre_mss_buy": pre_mss_buy,     # <--- ADDED THIS LINE
+        "pre_mss_sell": pre_mss_sell,   # <--- ADDED THIS LINE
         "warning": warning_msg,
         "killzone": killzone,
         "candles": candles,
@@ -1750,7 +1858,6 @@ def _run_fix_regression_tests():
     assert find_break_bar(closes, 103.0, False, 4) == len(closes) - 1
 
     plateau_n = 30
-    # FIX: Use a downtrend for the tail so it doesn't create a false swing high at the end of the array
     tail_highs = np.linspace(100, 90, plateau_n)
     tail_lows = np.linspace(95, 85, plateau_n)
     tail_opens = np.linspace(99, 89, plateau_n)
