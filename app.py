@@ -1,3 +1,6 @@
+import threading
+import time
+import scanner_engine
 import os
 import sys
 import random
@@ -12,6 +15,32 @@ import synthetic_engine
 import crt_engine
 
 app = Flask(__name__)
+
+# ==========================================
+# BACKGROUND TELEGRAM SCANNER (For Render)
+# ==========================================
+import logging
+logger_bg = logging.getLogger("scanner_bg")
+if not logger_bg.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+WATCHLIST_BG = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "BTCUSD"]
+
+def background_scanner():
+    logger_bg.info("🚀 Starting Background Telegram Scanner inside App...")
+    while True:
+        for symbol in WATCHLIST_BG:
+            try:
+                scanner_engine.analyze(symbol, "15m")
+            except Exception as e:
+                logger_bg.error(f"Crash on {symbol}: {e}")
+            time.sleep(2) # 2 seconds between pairs
+        time.sleep(300) # Sleep 5 minutes before next full scan
+
+# Start the bot in a background thread
+bot_thread = threading.Thread(target=background_scanner, daemon=True)
+bot_thread.start()
+# ==========================================
 
 
 # ---------- CURRICULUM ----------
