@@ -65,12 +65,15 @@ TELEGRAM_ENABLED = True
 _sent_alerts = set()
 _alert_lock = threading.Lock()
 
-# ---------- NEWS FILTER ----------
-_news_cache = {"data": None, "ts": 0}
-NEWS_CACHE_TTL = 14400  # Cache for 4 hours to prevent 429 Rate Limits
+# ---------- NEWS FILTER (FCS API) ----------
+FCS_API_KEY = "O9oQwL4Pj8NTTEqcArr3LWG"
+
+_news_cache = {"data": None, "ts": 0, "blocked_until": 0}
+NEWS_CACHE_TTL = 14400  # 4 hours (keeps you well under the rate limit)
+NEWS_BACKOFF_TIME = 3600 # 1 hour backoff if the API blocks us
 
 def is_news_blackout(symbol: str) -> Optional[str]:
-    """Checks if we are within 30 mins before/after a High Impact USD event."""
+    """Checks FCS API for High Impact USD events."""
     global _news_cache
     
     # Only apply to USD pairs and Gold
@@ -78,42 +81,71 @@ def is_news_blackout(symbol: str) -> Optional[str]:
         return None
 
     now_ts = time.time()
-    
-    # 1. Fetch data if cache is expired or empty
-    if not _news_cache["data"] or (now_ts - _news_cache["ts"]) > NEWS_CACHE_TTL:
-        try:
-            url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=5) as response:
-                _news_cache["data"] = json.loads(response.read().decode())
-                _news_cache["ts"] = now_ts
-        except Exception as e:
-            logger.warning(f"Failed to fetch news calendar: {e}")
-            return None # If API fails, we don't block trades, but we log it.
-
-    events = _news_cache["data"]
     now_utc = datetime.now(timezone.utc)
-    
-    # 2. Check events
-    for event in events:
-        if event.get("country") != "USD" or event.get("impact") != "High":
-            continue
-            
+
+    # 1. Circuit Breaker: If we got blocked recently, skip checking
+    if now_ts < _news_cache.get("blocked_until", 0):
+        return None
+
+    # 2. Check Cache
+    if _news_cache["data"] and (now_ts - _news_cache["ts"]) < NEWS_CACHE_TTL:
+        # We have fresh data, check it below
+        events = _news_cache["data"]
+    else:
+        # 3. Fetch from FCS API
+        today_str = now_utc.strftime('%Y-%m-%d')
+        url = "https://api-v4.fcsapi.com/forex/economy_cal"
+        
+        # We filter for USD and High Impact directly in the API call
+        params = {
+            "access_key": FCS_API_KEY,
+            "date": today_str,
+            "currency": "USD",
+            "impact": "High" 
+        }
+        
         try:
-            # Forex Factory times are in EST/EDT (usually with offset)
-            event_time = datetime.fromisoformat(event["date"])
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
             
-            # Ensure timezone awareness
-            if event_time.tzinfo is None:
-                event_time = event_time.replace(tzinfo=timezone.utc)
+            if data.get("status") is True:
+                events = data.get("response", [])
+                _news_cache["data"] = events
+                _news_cache["ts"] = now_ts
+            else:
+                logger.warning(f"FCS API returned error: {data.get('message')}")
+                _news_cache["blocked_until"] = now_ts + NEWS_BACKOFF_TIME
+                return None
                 
-            # Define the blackout window (30 mins before, 30 mins after)
+        except Exception as e:
+            logger.warning(f"Failed to fetch FCS news: {e}")
+            # Trip the circuit breaker
+            _news_cache["blocked_until"] = now_ts + NEWS_BACKOFF_TIME
+            return None
+
+    # 4. Analyze the events
+    for event in events:
+        try:
+            # FCS API usually returns dates like "2026-11-04 08:30:00"
+            # Adjust the format string if your API returns a different format (e.g., ISO with 'T')
+            event_time_str = event.get("date")
+            if not event_time_str:
+                continue
+                
+            # Parse date and make it UTC aware
+            event_time = datetime.strptime(event_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            
+            # Define 30 min blackout window
             blackout_start = event_time - timedelta(minutes=30)
             blackout_end = event_time + timedelta(minutes=30)
             
             if blackout_start <= now_utc <= blackout_end:
-                return f"NEWS BLACKOUT: {event['title']} at {event_time.strftime('%H:%M')} UTC"
-        except Exception:
+                title = event.get("title", "High Impact News")
+                return f"NEWS BLACKOUT: {title} at {event_time.strftime('%H:%M')} UTC"
+                
+        except Exception as e:
+            logger.debug(f"Error parsing event time: {e}")
             continue
             
     return None
