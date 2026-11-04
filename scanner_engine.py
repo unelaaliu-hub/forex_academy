@@ -89,7 +89,6 @@ def is_news_blackout(symbol: str) -> Optional[str]:
 
     # 2. Check Cache
     if _news_cache["data"] and (now_ts - _news_cache["ts"]) < NEWS_CACHE_TTL:
-        # We have fresh data, check it below
         events = _news_cache["data"]
     else:
         # 3. Fetch from FCS API
@@ -109,12 +108,14 @@ def is_news_blackout(symbol: str) -> Optional[str]:
             response.raise_for_status()
             data = response.json()
             
-            if data.get("status") is True:
+            # Convert status to string and lowercase just in case it's "True" instead of True
+            if str(data.get("status")).lower() == "true":
                 events = data.get("response", [])
                 _news_cache["data"] = events
                 _news_cache["ts"] = now_ts
             else:
-                logger.warning(f"FCS API returned error: {data.get('message')}")
+                # Print the whole response so we can see the REAL error message
+                logger.warning(f"FCS API REJECTED REQUEST. Full Response: {data}")
                 _news_cache["blocked_until"] = now_ts + NEWS_BACKOFF_TIME
                 return None
                 
@@ -127,8 +128,11 @@ def is_news_blackout(symbol: str) -> Optional[str]:
     # 4. Analyze the events
     for event in events:
         try:
+            # Ensure we only trigger on High impact (safety check)
+            if str(event.get("impact", event.get("importance", ""))).lower() != "high":
+                continue
+
             # FCS API usually returns dates like "2026-11-04 08:30:00"
-            # Adjust the format string if your API returns a different format (e.g., ISO with 'T')
             event_time_str = event.get("date")
             if not event_time_str:
                 continue
