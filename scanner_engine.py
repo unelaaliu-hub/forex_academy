@@ -6,8 +6,9 @@ REVISION 3 (V5 final pass) + USER CUSTOMIZATIONS:
   # USER CUSTOM 2 — MIN_RR set to 2.0 (strict 1:2 R:R).
   # USER CUSTOM 3 — Weekend check added to killzone logic.
   # USER CUSTOM 4 — Telegram Alert Integration.
-  # USER CUSTOM 5 — Telegram now alerts on ALL planned setups (even if price is not in zone).
+  # USER CUSTOM 5 — Telegram now alerts on ALL planned setups.
   # USER CUSTOM 6 — Added PRE-MSS SWEEP alerts for early entries.
+  # USER CUSTOM 7 — Added Forex Factory News Blackout filter.
   # FIX #1  — find_break_bar scans FORWARD from the swing, not backward.
   # FIX #2  — find_swings marks all plateau bars, dedupes to median.
   # FIX #3  — compute_correlations uses pct_change (returns).
@@ -37,6 +38,8 @@ from typing import Optional, Any, Dict, List, Tuple
 import time
 import urllib3
 import concurrent.futures
+import urllib.request
+import json
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -61,6 +64,59 @@ TELEGRAM_ENABLED = True
 
 _sent_alerts = set()
 _alert_lock = threading.Lock()
+
+# ---------- NEWS FILTER ----------
+_news_cache = {"data": None, "ts": 0}
+NEWS_CACHE_TTL = 3600  # Cache for 1 hour to prevent rate limits
+
+def is_news_blackout(symbol: str) -> Optional[str]:
+    """Checks if we are within 30 mins before/after a High Impact USD event."""
+    global _news_cache
+    
+    # Only apply to USD pairs and Gold
+    if "USD" not in symbol.upper() and "XAU" not in symbol.upper():
+        return None
+
+    now_ts = time.time()
+    
+    # 1. Fetch data if cache is expired or empty
+    if not _news_cache["data"] or (now_ts - _news_cache["ts"]) > NEWS_CACHE_TTL:
+        try:
+            url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                _news_cache["data"] = json.loads(response.read().decode())
+                _news_cache["ts"] = now_ts
+        except Exception as e:
+            logger.warning(f"Failed to fetch news calendar: {e}")
+            return None # If API fails, we don't block trades, but we log it.
+
+    events = _news_cache["data"]
+    now_utc = datetime.now(timezone.utc)
+    
+    # 2. Check events
+    for event in events:
+        if event.get("country") != "USD" or event.get("impact") != "High":
+            continue
+            
+        try:
+            # Forex Factory times are in EST/EDT (usually with offset)
+            event_time = datetime.fromisoformat(event["date"])
+            
+            # Ensure timezone awareness
+            if event_time.tzinfo is None:
+                event_time = event_time.replace(tzinfo=timezone.utc)
+                
+            # Define the blackout window (30 mins before, 30 mins after)
+            blackout_start = event_time - timedelta(minutes=30)
+            blackout_end = event_time + timedelta(minutes=30)
+            
+            if blackout_start <= now_utc <= blackout_end:
+                return f"NEWS BLACKOUT: {event['title']} at {event_time.strftime('%H:%M')} UTC"
+        except Exception:
+            continue
+            
+    return None
 
 def fmt_price(price: float) -> str:
     if price > 500:
@@ -1355,6 +1411,11 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
 
     warning_msg = None
 
+    # CHECK NEWS BLACKOUT
+    news_block = is_news_blackout(symbol)
+    if news_block:
+        return None, None, None, None, None, None, news_block
+
     if not bias or not mss:
         return None, None, None, None, None, None, warning_msg
 
@@ -1706,6 +1767,13 @@ def _analyze_inner(symbol: str, timeframe: str) -> Dict[str, Any]:
         if len(_sent_alerts) > 1000:
             _sent_alerts.clear()
 
+        # News Blackout Alert
+        if warning_msg and "NEWS BLACKOUT" in warning_msg:
+            alert_key = f"{symbol}_news_blackout_{datetime.now(timezone.utc).strftime('%Y%m%d%H')}"
+            if alert_key not in _sent_alerts:
+                _sent_alerts.add(alert_key)
+                send_telegram_alert(f"🛑 *{symbol} - MACRO WARNING* 🛑\n\n{warning_msg}\n\n_Scanner is locked. Do not trade._")
+
         # 1. Pre-MSS Alerts
         for setup in [pre_mss_buy, pre_mss_sell]:
             if setup:
@@ -1766,8 +1834,8 @@ def _analyze_inner(symbol: str, timeframe: str) -> Dict[str, Any]:
         "premium_discount": pd_zones,
         "buy_setup": buy_setup,
         "sell_setup": sell_setup,
-        "pre_mss_buy": pre_mss_buy,     # <--- ADDED THIS LINE
-        "pre_mss_sell": pre_mss_sell,   # <--- ADDED THIS LINE
+        "pre_mss_buy": pre_mss_buy,
+        "pre_mss_sell": pre_mss_sell,
         "warning": warning_msg,
         "killzone": killzone,
         "candles": candles,
