@@ -6,3 +6,4 @@ pandas
 yfinance
 websocket-client
 certifi
+biquote

@@ -65,15 +65,20 @@ TELEGRAM_ENABLED = True
 _sent_alerts = set()
 _alert_lock = threading.Lock()
 
-# ---------- NEWS FILTER (FCS API) ----------
-FCS_API_KEY = "O9oQwL4Pj8NTTEqcArr3LWG"
+import time
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+import logging
 
+# ... (keep your logger setup) ...
+
+# ---------- NEWS FILTER (Biquote - Free, No API Key) ----------
 _news_cache = {"data": None, "ts": 0, "blocked_until": 0}
-NEWS_CACHE_TTL = 14400  # 4 hours (keeps you well under the rate limit)
-NEWS_BACKOFF_TIME = 3600 # 1 hour backoff if the API blocks us
+NEWS_CACHE_TTL = 14400  # 4 hours
+NEWS_BACKOFF_TIME = 3600 # 1 hour backoff
 
 def is_news_blackout(symbol: str) -> Optional[str]:
-    """Checks FCS API for High Impact USD events."""
+    """Checks Biquote for High Impact USD events."""
     global _news_cache
     
     # Only apply to USD pairs and Gold
@@ -83,7 +88,7 @@ def is_news_blackout(symbol: str) -> Optional[str]:
     now_ts = time.time()
     now_utc = datetime.now(timezone.utc)
 
-    # 1. Circuit Breaker: If we got blocked recently, skip checking
+    # 1. Circuit Breaker
     if now_ts < _news_cache.get("blocked_until", 0):
         return None
 
@@ -91,53 +96,49 @@ def is_news_blackout(symbol: str) -> Optional[str]:
     if _news_cache["data"] and (now_ts - _news_cache["ts"]) < NEWS_CACHE_TTL:
         events = _news_cache["data"]
     else:
-        # 3. Fetch from FCS API
-        today_str = now_utc.strftime('%Y-%m-%d')
-        url = "https://api-v4.fcsapi.com/forex/economy_cal"
-        
-        # We filter for USD and High Impact directly in the API call
-        params = {
-            "access_key": FCS_API_KEY,
-            "date": today_str,
-            "currency": "USD",
-            "impact": "High" 
-        }
-        
+        # 3. Fetch from Biquote
         try:
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
+            from biquote import Biquote
+            bq = Biquote()
             
-            # Convert status to string and lowercase just in case it's "True" instead of True
-            if str(data.get("status")).lower() == "true":
-                events = data.get("response", [])
-                _news_cache["data"] = events
-                _news_cache["ts"] = now_ts
-            else:
-                # Print the whole response so we can see the REAL error message
-                logger.warning(f"FCS API REJECTED REQUEST. Full Response: {data}")
-                _news_cache["blocked_until"] = now_ts + NEWS_BACKOFF_TIME
-                return None
+            # Fetch high-impact events for US and EU (adjust countries as needed)
+            raw_events = bq.calendar(importance="high", countries="US")
+            
+            events = []
+            for e in raw_events:
+                # Normalize the time field to a string
+                time_val = e.get("date") or e.get("time") or e.get("datetime")
+                if not time_val:
+                    continue
+                    
+                # Convert datetime object to string if necessary
+                if isinstance(time_val, datetime):
+                    time_str = time_val.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    time_str = str(time_val).replace("T", " ").replace("Z", "")
                 
+                events.append({
+                    "title": e.get("title") or e.get("event") or "High Impact News",
+                    "date": time_str
+                })
+                
+            _news_cache["data"] = events
+            _news_cache["ts"] = now_ts
+            logger.info(f"✅ Fetched {len(events)} high-impact events from Biquote")
+
         except Exception as e:
-            logger.warning(f"Failed to fetch FCS news: {e}")
-            # Trip the circuit breaker
+            logger.warning(f"Failed to fetch Biquote news: {e}")
             _news_cache["blocked_until"] = now_ts + NEWS_BACKOFF_TIME
             return None
 
     # 4. Analyze the events
     for event in events:
         try:
-            # Ensure we only trigger on High impact (safety check)
-            if str(event.get("impact", event.get("importance", ""))).lower() != "high":
-                continue
-
-            # FCS API usually returns dates like "2026-11-04 08:30:00"
             event_time_str = event.get("date")
             if not event_time_str:
                 continue
                 
-            # Parse date and make it UTC aware
+            # Parse date (Biquote usually returns "YYYY-MM-DD HH:MM:SS")
             event_time = datetime.strptime(event_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             
             # Define 30 min blackout window
@@ -149,7 +150,7 @@ def is_news_blackout(symbol: str) -> Optional[str]:
                 return f"NEWS BLACKOUT: {title} at {event_time.strftime('%H:%M')} UTC"
                 
         except Exception as e:
-            logger.debug(f"Error parsing event time: {e}")
+            logger.debug(f"Error parsing event time '{event_time_str}': {e}")
             continue
             
     return None
