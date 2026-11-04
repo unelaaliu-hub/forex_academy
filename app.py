@@ -105,8 +105,11 @@ def calculator():
 def scanner():
     symbol = request.args.get('symbol', 'XAUUSD').upper()
     timeframe = request.args.get('tf', '15m')
+    # <!-- 200 EMA FILTER ADDED -->
+    ema_param = request.args.get('ema', 'true').lower()
+    use_ema_filter = True if ema_param == 'true' else False
     try:
-        result = scanner_engine.analyze(symbol, timeframe)
+        result = scanner_engine.analyze(symbol, timeframe, use_ema_filter)
     except Exception as e:
         result = {"error": str(e)}
     return render_template('scanner.html', data=result,
@@ -117,8 +120,11 @@ def scanner():
 def api_scanner():
     symbol = request.args.get('symbol', 'XAUUSD').upper()
     timeframe = request.args.get('tf', '15m')
+    # <!-- 200 EMA FILTER ADDED -->
+    ema_param = request.args.get('ema', 'true').lower()
+    use_ema_filter = True if ema_param == 'true' else False
     try:
-        result = scanner_engine.analyze(symbol, timeframe)
+        result = scanner_engine.analyze(symbol, timeframe, use_ema_filter)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)})
@@ -198,11 +204,14 @@ def api_crt_scanner():
 @app.route('/multi-scanner')
 def multi_scanner():
     timeframe = request.args.get('tf', '1h')
+    # <!-- 200 EMA FILTER ADDED -->
+    ema_param = request.args.get('ema', 'true').lower()
+    use_ema_filter = True if ema_param == 'true' else False
     symbols = ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'BTCUSD', 'ETHUSD']
     results = []
     for sym in symbols:
         try:
-            r = scanner_engine.analyze(sym, timeframe)
+            r = scanner_engine.analyze(sym, timeframe, use_ema_filter)
             results.append(r)
         except Exception as e:
             results.append({"symbol": sym, "error": str(e)})

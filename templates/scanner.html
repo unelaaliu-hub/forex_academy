@@ -253,6 +253,11 @@
       <label class="toggle-item" id="toggleCounterTrendLabel">
         <input type="checkbox" id="toggleCounterTrend" onchange="toggleCounterTrend(this)"> Show Counter-Trend
       </label>
+      <!-- 200 EMA FILTER ADDED -->
+      <label class="toggle-item active" id="toggleEmaFilterLabel">
+        <input type="checkbox" id="toggleEmaFilter" checked onchange="toggleEmaFilter(this)"> 200 EMA Filter
+      </label>
+      <!-- END 200 EMA FILTER ADDED -->
     </div>
 
     <div class="glass chart-card">
@@ -322,7 +327,7 @@
     </div>
 
     <div class="glass panel">
-      <div class="panel-title">🕒 Session</div>
+      <div class="panel-title">🕵️ Session</div>
       <div style="font-size:14px; color:#e6ecf5;" id="killzoneDisplay">{{ data.killzone }}</div>
     </div>
 
@@ -410,6 +415,7 @@ let rangeRedrawPending = false;
 
 const show = { HTF: true, OB: true, FVG: true, POOL: true, PDHL: true, SESSION: true, OTE: true, SETUP: false, SWING: true, H4: true };
 let showCounterTrend = false;
+let useEmaFilter = true; // <!-- 200 EMA FILTER ADDED -->
 const MAX_SWINGS_PER_SIDE = 5;
 let lastZoneSig = null;
 
@@ -596,6 +602,16 @@ function toggleCounterTrend(checkbox) {
   else label.classList.remove('active');
   if (currentData) renderData(currentData, true);
 }
+
+// <!-- 200 EMA FILTER ADDED -->
+function toggleEmaFilter(checkbox) {
+  useEmaFilter = checkbox.checked;
+  const label = document.getElementById('toggleEmaFilterLabel');
+  if (checkbox.checked) label.classList.add('active');
+  else label.classList.remove('active');
+  // No immediate redraw needed, will apply on next fetch
+}
+// <!-- END 200 EMA FILTER ADDED -->
 
 function drawHTFZones(data) {
   if (!show.HTF || !data.bias || !data.bias.htf_obs) return;
@@ -1400,7 +1416,7 @@ function computePrePlan(data, mode) {
 function renderPreMssBox(p) {
   const isBuy = p.direction === 'BUY';
   const dirColor = isBuy ? 'var(--green)' : 'var(--red)';
-  const dirLabel = isBuy ? '▼ BUY' : '▲ SELL';
+  const dirLabel = isBuy ? '▲ BUY' : '▼ SELL';
   const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);
 
   let html = `<div class="planned-box" style="border-color: #fbbf24; background: rgba(251, 191, 36, 0.15); margin-bottom: 12px;">`;
@@ -1420,7 +1436,7 @@ function renderPreMssBox(p) {
 function renderPlannedBox(p, mode, forceChase) {
   const isBuy = p.direction === 'BUY';
   const dirColor = isBuy ? 'var(--green)' : 'var(--red)';
-  const dirLabel = isBuy ? '▼ BUY' : '▲ SELL';
+  const dirLabel = isBuy ? '▲ BUY' : '▼ SELL';
   const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);
   const distTxt = p.inZone
     ? '<span style="color:var(--green); font-weight:600;">✅ PRICE IN ZONE</span>'
@@ -1668,7 +1684,7 @@ function updateSetupPanel(data) {
 
   const isBuy = engineSetup.direction === 'BUY';
   panel.className = 'setup-panel ' + (isBuy ? 'buy' : 'sell');
-  dirEl.textContent = (isBuy ? '▼ BUY' : '▲ SELL') + ' | ' + engineSetup.confidence;
+  dirEl.textContent = (isBuy ? '▲ BUY' : '▼ SELL') + ' | ' + engineSetup.confidence;
   rrEl.textContent = 'R:R 1 : ' + engineSetup.rr.toFixed(2);
 
   const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);
@@ -1919,9 +1935,10 @@ window.addEventListener('load', () => {
       statusEl.textContent = 'Refreshing...';
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000); // Increased to 30 seconds
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-      fetch(`/api/scanner?symbol=${meta.symbol}&tf=${meta.tf}`, {
+      // <!-- 200 EMA FILTER ADDED TO FETCH -->
+      fetch(`/api/scanner?symbol=${meta.symbol}&tf=${meta.tf}&ema=${useEmaFilter}`, {
         cache: 'no-store',
         signal: controller.signal
       })

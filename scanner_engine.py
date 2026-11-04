@@ -8,7 +8,7 @@ REVISION 3 (V5 final pass) + USER CUSTOMIZATIONS:
   # USER CUSTOM 4 — Telegram Alert Integration.
   # USER CUSTOM 5 — Telegram now alerts on ALL planned setups.
   # USER CUSTOM 6 — Added PRE-MSS SWEEP alerts for early entries.
-  # USER CUSTOM 7 — Added Forex Factory News Blackout filter.
+  # USER CUSTOM 7 — Added Biquote News Blackout filter.
   # FIX #1  — find_break_bar scans FORWARD from the swing, not backward.
   # FIX #2  — find_swings marks all plateau bars, dedupes to median.
   # FIX #3  — compute_correlations uses pct_change (returns).
@@ -38,8 +38,6 @@ from typing import Optional, Any, Dict, List, Tuple
 import time
 import urllib3
 import concurrent.futures
-import urllib.request
-import json
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -64,13 +62,6 @@ TELEGRAM_ENABLED = True
 
 _sent_alerts = set()
 _alert_lock = threading.Lock()
-
-import time
-from datetime import datetime, timezone, timedelta
-from typing import Optional
-import logging
-
-# ... (keep your logger setup) ...
 
 # ---------- NEWS FILTER (Biquote - Free, No API Key) ----------
 _news_cache = {"data": None, "ts": 0, "blocked_until": 0}
@@ -101,7 +92,7 @@ def is_news_blackout(symbol: str) -> Optional[str]:
             from biquote import Biquote
             bq = Biquote()
             
-            # Fetch high-impact events for US and EU (adjust countries as needed)
+            # Fetch high-impact events for US
             raw_events = bq.calendar(importance="high", countries="US")
             
             events = []
@@ -1433,7 +1424,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                        fvgs: List[dict], pools: List[dict], pd_zones: Optional[dict],
                        timeframe: str, mss: Optional[dict] = None, symbol: str = "",
                        bias: Optional[dict] = None, killzone_ok: bool = True,
-                       sweep: Optional[dict] = None) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[str]]:
+                       sweep: Optional[dict] = None, use_ema_filter: bool = True) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[str]]:
     atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
     current_price = safe_float(df["close"].values[-1])
 
@@ -1472,6 +1463,19 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             risk = sl - current_price
             if risk > 0:
                 pre_mss_sell = {"direction": "SELL", "entry": current_price, "sl": sl, "tp1": current_price - risk * 2.0, "tp2": current_price - risk * 3.0, "rr": 2.0, "zone_type": "PRE-MSS SWEEP", "confidence": "EARLY ENTRY", "zone_quality": 0, "checklist": [], "score": 0, "reasons": [], "sl_basis": "sweep wick", "tp_basis": "fixed 1:2"}
+
+    # 🛑 200 EMA HARD FILTER
+    if use_ema_filter:
+        ema_200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
+        current_price = df["close"].values[-1]
+
+        if mss["type"] == "MSS_BEAR" and current_price > ema_200:
+            warning_msg = "⚠️ BLOCKED SELL: Price is above 200 EMA (Bullish Momentum)"
+            return None, None, None, None, pre_mss_buy, None, warning_msg
+            
+        if mss["type"] == "MSS_BULL" and current_price < ema_200:
+            warning_msg = "⚠️ BLOCKED BUY: Price is below 200 EMA (Bearish Momentum)"
+            return None, None, None, None, None, pre_mss_sell, warning_msg
 
     recent = df.tail(3)
     displacement_bear = False
@@ -1707,7 +1711,7 @@ def _build_swing_markers(df: pd.DataFrame, swings: List[dict]) -> List[Dict[str,
     return markers
 
 
-def _analyze_inner(symbol: str, timeframe: str) -> Dict[str, Any]:
+def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> Dict[str, Any]:
     df, live_px, used_source, is_tick = _fetch_with_live_cached(symbol, timeframe)
     if df is None or df.empty:
         return {"error": f"Could not fetch {symbol} {timeframe}: {used_source}"}
@@ -1738,7 +1742,7 @@ def _analyze_inner(symbol: str, timeframe: str) -> Dict[str, Any]:
 
     buy_setup, sell_setup, planned_buy, planned_sell, pre_mss_buy, pre_mss_sell, warning_msg = generate_scenarios(
         df, structure, obs, fvgs, pools, pd_zones, timeframe, mss,
-        symbol=symbol, bias=bias, killzone_ok=killzone_ok, sweep=sweep
+        symbol=symbol, bias=bias, killzone_ok=killzone_ok, sweep=sweep, use_ema_filter=use_ema_filter
     )
     killzone = current_killzone(symbol)
 
@@ -1885,9 +1889,9 @@ def _analyze_inner(symbol: str, timeframe: str) -> Dict[str, Any]:
     }
 
 
-def analyze(symbol: str, timeframe: str) -> Dict[str, Any]:
+def analyze(symbol: str, timeframe: str, use_ema_filter: bool = True) -> Dict[str, Any]:
     try:
-        return _analyze_inner(symbol, timeframe)
+        return _analyze_inner(symbol, timeframe, use_ema_filter)
     except Exception as e:
         logger.exception("analyze() failed for %s %s", symbol, timeframe)
         return {
