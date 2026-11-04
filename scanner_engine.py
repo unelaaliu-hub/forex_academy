@@ -67,7 +67,7 @@ _alert_lock = threading.Lock()
 
 # ---------- NEWS FILTER ----------
 _news_cache = {"data": None, "ts": 0}
-NEWS_CACHE_TTL = 3600  # Cache for 1 hour to prevent rate limits
+NEWS_CACHE_TTL = 14400  # Cache for 4 hours to prevent 429 Rate Limits
 
 def is_news_blackout(symbol: str) -> Optional[str]:
     """Checks if we are within 30 mins before/after a High Impact USD event."""
