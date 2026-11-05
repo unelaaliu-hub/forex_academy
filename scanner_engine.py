@@ -7,7 +7,7 @@ REVISION 3 (V5 final pass) + USER CUSTOMIZATIONS:
   # USER CUSTOM 3 — Weekend check added to killzone logic.
   # USER CUSTOM 4 — Telegram Alert Integration.
   # USER CUSTOM 5 — Telegram now alerts on ALL planned setups.
-  # USER CUSTOM 6 — Added PRE-MSS SWEEP alerts for early entries.
+  # USER CUSTOM 6 — Added PRE-MSS SWEEP alerts for early entries (Moved UP for speed).
   # USER CUSTOM 7 — Added Biquote News Blackout filter.
   # USER CUSTOM 8 - Added BOS Continuation logic (Trend Riding).
   # FIX #1  — find_break_bar scans FORWARD from the swing, not backward.
@@ -1445,12 +1445,12 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     if news_block:
         return None, None, None, None, None, None, news_block
 
-    if not bias or not mss:
+    if not bias:
         return None, None, None, None, None, None, warning_msg
 
     bias_tier = bias.get("tier", "NEUTRAL")
 
-    # Pre-MSS Setup Logic
+    # Pre-MSS Setup Logic (Moved UP so it can fire BEFORE the MSS happens)
     pre_mss_buy, pre_mss_sell = None, None
     if sweep and sweep.get("latest"):
         latest = sweep["latest"]
@@ -1464,6 +1464,10 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             risk = sl - current_price
             if risk > 0:
                 pre_mss_sell = {"direction": "SELL", "entry": current_price, "sl": sl, "tp1": current_price - risk * 2.0, "tp2": current_price - risk * 3.0, "rr": 2.0, "zone_type": "PRE-MSS SWEEP", "confidence": "EARLY ENTRY", "zone_quality": 0, "checklist": [], "score": 0, "reasons": [], "sl_basis": "sweep wick", "tp_basis": "fixed 1:2"}
+
+    # If no MSS, return the Pre-MSS setups (if any) and stop here
+    if not mss:
+        return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
 
     # 🛑 200 EMA HARD FILTER
     if use_ema_filter:
