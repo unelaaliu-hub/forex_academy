@@ -9,6 +9,7 @@ REVISION 3 (V5 final pass) + USER CUSTOMIZATIONS:
   # USER CUSTOM 5 — Telegram now alerts on ALL planned setups.
   # USER CUSTOM 6 — Added PRE-MSS SWEEP alerts for early entries.
   # USER CUSTOM 7 — Added Biquote News Blackout filter.
+  # USER CUSTOM 8 - Added BOS Continuation logic (Trend Riding).
   # FIX #1  — find_break_bar scans FORWARD from the swing, not backward.
   # FIX #2  — find_swings marks all plateau bars, dedupes to median.
   # FIX #3  — compute_correlations uses pct_change (returns).
@@ -1737,6 +1738,15 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
     killzone_ok = in_killzone(symbol)
     bias = get_bias(symbol)
 
+    # NEW: BOS Continuation Logic
+    if not mss and bias and bias.get("tier") in ("STRONG", "WEAK"):
+        bos = structure.get("bos")
+        if bos:
+            if bias["h4_trend"] == "BULLISH" and bos["type"] == "BOS_BULL":
+                mss = {"type": "MSS_BULL", "level": bos["level"], "break_index": len(df)-1, "description": "BOS Continuation (Trend)"}
+            elif bias["h4_trend"] == "BEARISH" and bos["type"] == "BOS_BEAR":
+                mss = {"type": "MSS_BEAR", "level": bos["level"], "break_index": len(df)-1, "description": "BOS Continuation (Trend)"}
+
     smt_result = detect_smt_divergence(symbol, timeframe, structure)
     ote_result = compute_ote_levels(structure)
 
@@ -1824,12 +1834,13 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                     emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
                     send_telegram_alert(f"⚡ *{symbol} - {emoji} PRE-MSS SWEEP* ⚡\n\nEntry: {fmt_price(setup['entry'])}\nSL: {fmt_price(setup['sl'])}\nTP1: {fmt_price(setup['tp1'])}\nR:R: 1 : 2.00\n\n⚠️ _EARLY ENTRY. High Risk. Wait for MSS if unsure._\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']})")
 
-        # 2. MSS Alert
+        # 2. MSS / BOS Alert
         if mss_out:
             alert_key = f"{symbol}_mss_{mss_out['break_index']}_{mss_out['type']}"
             if alert_key not in _sent_alerts:
                 _sent_alerts.add(alert_key)
-                send_telegram_alert(f"🚨 *{symbol} - {mss_out['type']}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']})\nSession: {killzone}\n\n👉 _Open scanner to check for setup._")
+                signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
+                send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']})\nSession: {killzone}\n\n👉 _Open scanner to check for setup._")
 
         # 3. Planned / Active Setup Alert
         for setup in [buy_setup, sell_setup, planned_buy, planned_sell]:
