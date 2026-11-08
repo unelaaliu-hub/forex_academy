@@ -1,31 +1,22 @@
 """
 Live Chart Scanner — OANDA with yfinance fallback
 
-REVISION 3 (V5 final pass) + USER CUSTOMIZATIONS:
+REVISION 4 (Institutional Grade):
   # USER CUSTOM 1 — Hardcoded OANDA API Key.
   # USER CUSTOM 2 — MIN_RR set to 2.0 (strict 1:2 R:R).
   # USER CUSTOM 3 — Weekend check added to killzone logic.
   # USER CUSTOM 4 — Telegram Alert Integration.
   # USER CUSTOM 5 — Telegram now alerts on ALL planned setups.
-  # USER CUSTOM 6 — Added PRE-MSS SWEEP alerts for early entries (Moved UP for speed).
+  # USER CUSTOM 6 — Added PRE-MSS SWEEP alerts (Guarded by EMA & Chop filters).
   # USER CUSTOM 7 — Added Biquote News Blackout filter.
   # USER CUSTOM 8 - Added BOS Continuation logic (Trend Riding).
-  # FIX #1  — find_break_bar scans FORWARD from the swing, not backward.
-  # FIX #2  — find_swings marks all plateau bars, dedupes to median.
-  # FIX #3  — compute_correlations uses pct_change (returns).
-  # FIX #4  — fetch_data_with_live returns live_price_is_tick.
-  # FIX #5  — analyze() wrapped in try/except.
-  # FIX #6  — detect_recent_sweep returns per-side sweeps.
-  # FIX #7  — _cache_set enforces _CACHE_MAX.
-  # FIX #8  — oanda_request handles 429 gracefully.
-  # FIX #10 — analyze() uses 30s TTL cache (_fetch_with_live_cached).
-  # FIX #11 — Golden OHLC fixture tests for OB/FVG.
-  # FIX #12 — Sweep per-side test.
-  # FIX #13 — Cache eviction test.
-  # FIX #14 — 429 handling test.
-  # FIX #15 — Three-state sweep detail in checklist.
-  # FIX #16 — Counter-trend downgrade (limits confidence to LOW/MEDIUM).
-  # FIX #17 — Added Data Sanity Check for XAUUSD to prevent fake Yahoo prices.
+  # USER CUSTOM 9 - Added H1 Trend Check & Chop Filter to eliminate false signals.
+  # USER CUSTOM 10 - Added DXY Correlation Filter for XAUUSD (Guards MSS and Pre-MSS).
+  # USER CUSTOM 11 - Added Pre-Market Game Plan generator (CLI flag --plan).
+  # USER CUSTOM 12 - Added Sequence Enforcer and Session Sweep filters to Checklist.
+  # USER CUSTOM 13 - Added Unicorn Setup (OB+FVG Overlap) & Daily Open Alignment.
+  # USER CUSTOM 14 - Added Rejection Wick filter & Daily Draw on Liquidity (TP2).
+  # FIX #18 - Hard Weekend Blocker & Telegram Alert Sanity Checks.
 """
 import os
 import sys
@@ -50,13 +41,11 @@ if not logging.getLogger().handlers:
     )
 
 # ---------- Config ----------
-# HARDCODED API KEY
 OANDA_API_KEY = "7601c3626d13d6a4cbcc8a96a91b01aa-9e0a98d2f5cba0b6e3d2a5905c61e91a"
 OANDA_BASE_URL = "https://api-fxpractice.oanda.com"
 
 OANDA_INSECURE_RETRY = os.environ.get("OANDA_INSECURE_RETRY", "0").strip() == "1"
 
-# TELEGRAM CONFIG
 TELEGRAM_BOT_TOKEN = "9178114200:AAFiPUmLQwh2u2TAujibEtD53-1mkAfkg4s"
 TELEGRAM_CHAT_ID = "7475843376" 
 TELEGRAM_ENABLED = True
@@ -64,46 +53,36 @@ TELEGRAM_ENABLED = True
 _sent_alerts = set()
 _alert_lock = threading.Lock()
 
-# ---------- NEWS FILTER (Biquote - Free, No API Key) ----------
+# ---------- NEWS FILTER ----------
 _news_cache = {"data": None, "ts": 0, "blocked_until": 0}
-NEWS_CACHE_TTL = 14400  # 4 hours
-NEWS_BACKOFF_TIME = 3600 # 1 hour backoff
+NEWS_CACHE_TTL = 14400
+NEWS_BACKOFF_TIME = 3600
 
 def is_news_blackout(symbol: str) -> Optional[str]:
-    """Checks Biquote for High Impact USD events."""
     global _news_cache
-    
-    # Only apply to USD pairs and Gold
     if "USD" not in symbol.upper() and "XAU" not in symbol.upper():
         return None
 
     now_ts = time.time()
     now_utc = datetime.now(timezone.utc)
 
-    # 1. Circuit Breaker
     if now_ts < _news_cache.get("blocked_until", 0):
         return None
 
-    # 2. Check Cache
     if _news_cache["data"] and (now_ts - _news_cache["ts"]) < NEWS_CACHE_TTL:
         events = _news_cache["data"]
     else:
-        # 3. Fetch from Biquote
         try:
             from biquote import Biquote
             bq = Biquote()
-            
-            # Fetch high-impact events for US
             raw_events = bq.calendar(importance="high", countries="US")
             
             events = []
             for e in raw_events:
-                # Normalize the time field to a string
                 time_val = e.get("date") or e.get("time") or e.get("datetime")
                 if not time_val:
                     continue
                     
-                # Convert datetime object to string if necessary
                 if isinstance(time_val, datetime):
                     time_str = time_val.strftime("%Y-%m-%d %H:%M:%S")
                 else:
@@ -123,17 +102,14 @@ def is_news_blackout(symbol: str) -> Optional[str]:
             _news_cache["blocked_until"] = now_ts + NEWS_BACKOFF_TIME
             return None
 
-    # 4. Analyze the events
     for event in events:
         try:
             event_time_str = event.get("date")
             if not event_time_str:
                 continue
                 
-            # Parse date (Biquote usually returns "YYYY-MM-DD HH:MM:SS")
             event_time = datetime.strptime(event_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             
-            # Define 30 min blackout window
             blackout_start = event_time - timedelta(minutes=30)
             blackout_end = event_time + timedelta(minutes=30)
             
@@ -166,7 +142,6 @@ def send_telegram_alert(message: str):
     except Exception as e:
         logger.debug(f"Telegram alert failed: {e}")
 
-# STRICT 1:2 R:R
 MIN_RR = 2.0
 FORMING_TTL = 120
 FAILURE_TTL = 30
@@ -177,6 +152,7 @@ INSTRUMENT_MAP = {
     "XAUUSD": "XAU_USD", "EURUSD": "EUR_USD", "GBPUSD": "GBP_USD",
     "USDJPY": "USD_JPY", "AUDUSD": "AUD_USD", "BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD",
     "NAS100": "NAS100_USD", "US100": "NAS100_USD", "US30": "US30_USD", "JPN225": "JP225_USD",
+    "DXY": "USD_INDEX"
 }
 GRANULARITY_MAP = {"15m": "M15", "1h": "H1", "4h": "H4", "1d": "D"}
 
@@ -184,21 +160,19 @@ YF_FALLBACK = {
     "XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X", "AUDUSD": "AUDUSD=X", "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
     "NAS100": "NQ=F", "US100": "NQ=F", "US30": "YM=F", "JPN225": "^N225",
+    "DXY": "DX-Y.NYB"
 }
-# 4h is NOT a native yfinance interval; fetch_from_yahoo resamples from 1h.
 YF_PERIOD = {"15m": "60d", "1h": "180d", "4h": "730d", "1d": "5y"}
 
 CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD"}
 INDEX_SYMBOLS = {"NAS100", "US100", "US30", "JPN225"}
 
-# ---------- Caches ----------
 _df_cache: Dict[str, Tuple[float, pd.DataFrame]] = {}
 _bias_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _failure_cache: Dict[str, Tuple[float, bool]] = {}
 _forming_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _analyze_cache: Dict[str, Dict[str, Any]] = {}
 _cache_lock = threading.RLock()
-
 
 def _cache_get(cache: Dict, key: Any, ttl: float):
     with _cache_lock:
@@ -208,14 +182,12 @@ def _cache_get(cache: Dict, key: Any, ttl: float):
                 return val
     return None
 
-
 def _cache_set(cache: Dict, key: Any, val: Any) -> None:
     with _cache_lock:
         cache[key] = (time.time(), val)
         if len(cache) > _CACHE_MAX:
             oldest = min(cache, key=lambda k: cache[k][0])
             cache.pop(oldest, None)
-
 
 def safe_float(v: Any, default: float = 0.0) -> float:
     try:
@@ -226,13 +198,11 @@ def safe_float(v: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
-
 def safe_int(v: Any, default: int = 0) -> int:
     try:
         return int(v)
     except Exception:
         return default
-
 
 TF_PARAMS = {
     "15m": {"swing_left": 3, "swing_right": 3, "ob_impulse_mult": 1.2, "ob_range_mult": 1.0,
@@ -253,10 +223,8 @@ TF_PARAMS = {
            "mss_max_swing_age": 20},
 }
 
-
 def tf_params(timeframe: str) -> Dict[str, Any]:
     return TF_PARAMS.get(timeframe, TF_PARAMS["15m"])
-
 
 try:
     from zoneinfo import ZoneInfo
@@ -272,7 +240,6 @@ except Exception:
         _LONDON_TZ = None
         logger.warning("zoneinfo/pytz unavailable; killzone times may be DST-inaccurate.")
 
-
 def current_killzone(symbol: str = "") -> str:
     if symbol.upper() in CRYPTO_SYMBOLS:
         return "CRYPTO 24/7 🔥"
@@ -285,7 +252,6 @@ def current_killzone(symbol: str = "") -> str:
     weekday = now_est.weekday()
     hour = now_est.hour
     
-    # Forex closes Friday 5 PM EST, opens Sunday 5 PM EST
     if weekday == 5: 
         return "OFF-SESSION (WEEKEND)"
     if weekday == 6 and hour < 17: 
@@ -304,12 +270,10 @@ def current_killzone(symbol: str = "") -> str:
     else:
         return "OFF-SESSION"
 
-
 def in_killzone(symbol: str = "") -> bool:
     if symbol.upper() in CRYPTO_SYMBOLS:
         return True
     return "KILLZONE" in current_killzone(symbol)
-
 
 def oanda_request(url: str, headers: Dict[str, str], params: Optional[dict] = None,
                   retries: int = 1, allow_insecure: bool = False):
@@ -348,7 +312,6 @@ def oanda_request(url: str, headers: Dict[str, str], params: Optional[dict] = No
             time.sleep(0.5)
     return None
 
-
 def _forming_get(symbol: str, timeframe: str) -> Optional[dict]:
     key = (symbol.upper(), timeframe)
     with _cache_lock:
@@ -357,14 +320,12 @@ def _forming_get(symbol: str, timeframe: str) -> Optional[dict]:
             return entry["data"]
     return None
 
-
 def _forming_put(symbol: str, timeframe: str, data: dict) -> None:
     with _cache_lock:
         _forming_cache[(symbol.upper(), timeframe)] = {"data": data, "ts": time.time()}
         if len(_forming_cache) > _CACHE_MAX:
             oldest = min(_forming_cache, key=lambda k: _forming_cache[k]["ts"])
             _forming_cache.pop(oldest, None)
-
 
 def fetch_from_oanda(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], Optional[float], str]:
     if not OANDA_API_KEY:
@@ -431,7 +392,6 @@ def fetch_from_oanda(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame
     df = df[~df.index.duplicated(keep="last")].dropna()
     return df, live_price, "OANDA"
 
-
 def fetch_from_yahoo(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], Optional[float], str]:
     try:
         import yfinance as yf
@@ -481,11 +441,9 @@ def fetch_from_yahoo(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame
     except Exception as e:
         return None, None, f"Yahoo error: {str(e)[:100]}"
 
-
 def fetch_data_with_live(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], Optional[float], str, bool]:
     df, live_px, src = fetch_from_oanda(symbol, timeframe)
     if df is not None:
-        # SANITY CHECK: Reject corrupted OANDA data for Gold
         if symbol.upper() == "XAUUSD" and safe_float(df["close"].values[-1]) < 1000:
             logger.warning("Corrupted OANDA data for XAUUSD. Rejecting.")
         else:
@@ -498,14 +456,12 @@ def fetch_data_with_live(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataF
     if df2 is not None:
         last_close = safe_float(df2["close"].values[-1])
         
-        # SANITY CHECK: Reject corrupted YAHOO data for Gold
         if symbol.upper() == "XAUUSD" and last_close < 1000:
             logger.warning("Corrupted YAHOO data for XAUUSD. Rejecting.")
             return None, None, "Corrupted Data (Price < 1000)", False
             
         return df2, last_close, src2, False
     return None, None, f"{src} / {src2}", False
-
 
 def _fetch_with_live_cached(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], Optional[float], str, bool]:
     key = f"{symbol.upper()}_{timeframe}"
@@ -526,16 +482,13 @@ def _fetch_with_live_cached(symbol: str, timeframe: str) -> Tuple[Optional[pd.Da
             _analyze_cache.pop(oldest, None)
     return df, live_px, source, is_tick
 
-
 def fetch_data(symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], str]:
     df, _, src, _ = fetch_data_with_live(symbol, timeframe)
     return df, src
 
-
 def fetch_live_price(symbol: str, timeframe: str) -> Optional[float]:
     _, live_px, _, _ = fetch_data_with_live(symbol, timeframe)
     return live_px
-
 
 def fetch_data_cached(symbol: str, timeframe: str, ttl: int = 300) -> Tuple[pd.DataFrame, str]:
     key = f"{symbol}_{timeframe}"
@@ -555,7 +508,6 @@ def fetch_data_cached(symbol: str, timeframe: str, ttl: int = 300) -> Tuple[pd.D
 
     _cache_set(_df_cache, key, df)
     return df, src
-
 
 def find_swings(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     params = tf_params(timeframe)
@@ -592,7 +544,6 @@ def find_swings(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     df["sh"] = _dedupe_plateaus(sh_raw)
     df["sl"] = _dedupe_plateaus(sl_raw)
     return df
-
 
 def detect_structure(df: pd.DataFrame) -> Dict[str, Any]:
     sh_idx = [i for i, v in enumerate(df["sh"].values) if v]
@@ -652,7 +603,6 @@ def detect_structure(df: pd.DataFrame) -> Dict[str, Any]:
         "swing_highs": sh_out, "swing_lows": sl_out,
     }
 
-
 def find_break_bar(closes: np.ndarray, level: float, bullish: bool, start: int) -> int:
     n = len(closes)
     start = max(0, min(start, n))
@@ -661,7 +611,6 @@ def find_break_bar(closes: np.ndarray, level: float, bullish: bool, start: int) 
         if (bullish and c > level) or (not bullish and c < level):
             return i
     return n - 1
-
 
 def detect_mss(df: pd.DataFrame, structure: Dict[str, Any], timeframe: str = "15m") -> Optional[dict]:
     sh = structure["swing_highs"]
@@ -724,8 +673,18 @@ def detect_mss(df: pd.DataFrame, structure: Dict[str, Any], timeframe: str = "15
                            "break_index": break_idx,
                            "description": f"Price closed below prior swing low at {prev_low_price:.2f} — early bearish shift"}
 
-    return mss
+    if mss:
+        break_candle = df.iloc[mss["break_index"]]
+        total_range = safe_float(break_candle["high"]) - safe_float(break_candle["low"])
+        if total_range > 0:
+            if mss["type"] == "MSS_BULL":
+                upper_wick = safe_float(break_candle["high"]) - max(safe_float(break_candle["open"]), safe_float(break_candle["close"]))
+                if upper_wick > (total_range * 0.4): mss["quality"] = "weak"
+            elif mss["type"] == "MSS_BEAR":
+                lower_wick = min(safe_float(break_candle["open"]), safe_float(break_candle["close"])) - safe_float(break_candle["low"])
+                if lower_wick > (total_range * 0.4): mss["quality"] = "weak"
 
+    return mss
 
 def detect_recent_sweep(df: pd.DataFrame, structure: Dict[str, Any], lookback: int = 40) -> Optional[dict]:
     sh = structure.get("swing_highs", [])
@@ -786,7 +745,6 @@ def detect_recent_sweep(df: pd.DataFrame, structure: Dict[str, Any], lookback: i
         "ssl": ssl_list[-1] if ssl_list else None,
     }
 
-
 def get_previous_day_hl(symbol: str) -> Tuple[Optional[float], Optional[float]]:
     try:
         d1_df, _ = fetch_data_cached(symbol, "1d", ttl=1800)
@@ -806,6 +764,14 @@ def get_previous_day_hl(symbol: str) -> Tuple[Optional[float], Optional[float]]:
         logger.warning("get_previous_day_hl failed for %s: %s", symbol, e)
     return None, None
 
+def get_daily_open(symbol: str) -> Optional[float]:
+    try:
+        d1_df, _ = fetch_data_cached(symbol, "1d", ttl=1800)
+        if d1_df is not None and not d1_df.empty:
+            return safe_float(d1_df["open"].values[-1])
+    except Exception as e:
+        logger.warning("get_daily_open failed for %s: %s", symbol, e)
+    return None
 
 def get_session_ranges(df: pd.DataFrame, symbol: str = "", timeframe: str = "15m") -> Dict[str, Any]:
     if symbol.upper() in CRYPTO_SYMBOLS:
@@ -875,7 +841,6 @@ def get_session_ranges(df: pd.DataFrame, symbol: str = "", timeframe: str = "15m
 
     return result
 
-
 def compute_dealing_range(df: pd.DataFrame, structure: Dict[str, Any], timeframe: str) -> Optional[dict]:
     atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
     if atr <= 0:
@@ -918,7 +883,6 @@ def compute_dealing_range(df: pd.DataFrame, structure: Dict[str, Any], timeframe
                 "size_atr": (high - low) / atr, "fallback": True}
     return None
 
-
 def count_ob_touches(df: pd.DataFrame, impulse_index: int, ob_top: float, ob_bottom: float) -> int:
     touches = 0
     in_zone = False
@@ -932,7 +896,6 @@ def count_ob_touches(df: pd.DataFrame, impulse_index: int, ob_top: float, ob_bot
         elif not touched:
             in_zone = False
     return touches
-
 
 def _ranges_overlap(a_top: float, a_bottom: float, b_top: float, b_bottom: float,
                     threshold: float = 0.5) -> bool:
@@ -948,7 +911,6 @@ def _ranges_overlap(a_top: float, a_bottom: float, b_top: float, b_bottom: float
         return False
     overlap_size = overlap_hi - overlap_lo
     return (overlap_size / min(a_size, b_size)) >= threshold
-
 
 def find_order_blocks(df: pd.DataFrame, timeframe: str, lookback: int = 300) -> List[dict]:
     params = tf_params(timeframe)
@@ -1032,7 +994,6 @@ def find_order_blocks(df: pd.DataFrame, timeframe: str, lookback: int = 300) -> 
 
     return kept
 
-
 def find_fvgs(df: pd.DataFrame, timeframe: str, lookback: int = 300) -> List[dict]:
     params = tf_params(timeframe)
     min_quality = params["min_fvg_quality"]
@@ -1074,7 +1035,6 @@ def find_fvgs(df: pd.DataFrame, timeframe: str, lookback: int = 300) -> List[dic
         if len(fresh) >= 2:
             break
     return fresh
-
 
 def find_liquidity_pools(df: pd.DataFrame, structure: Dict[str, Any], timeframe: str) -> List[dict]:
     params = tf_params(timeframe)
@@ -1137,7 +1097,6 @@ def find_liquidity_pools(df: pd.DataFrame, structure: Dict[str, Any], timeframe:
 
     return bsl_out + ssl_out
 
-
 def premium_discount(df: pd.DataFrame, structure: Dict[str, Any],
                      current_price: Optional[float] = None,
                      dealing_range: Optional[dict] = None) -> Optional[dict]:
@@ -1160,6 +1119,16 @@ def premium_discount(df: pd.DataFrame, structure: Dict[str, Any],
             "position": "PREMIUM" if px > mid else "DISCOUNT",
             "current_price": px}
 
+def get_dxy_trend() -> str:
+    try:
+        dxy_df, _ = fetch_data_cached("DXY", "1h", ttl=300)
+        if dxy_df is not None and len(dxy_df) >= 50:
+            dxy_df = find_swings(dxy_df, "1h")
+            dxy_struct = detect_structure(dxy_df)
+            return dxy_struct["trend"]
+    except Exception as e:
+        logger.warning(f"Failed to fetch DXY trend: {e}")
+    return "RANGING"
 
 def get_bias(symbol: str) -> Dict[str, Any]:
     cached = _cache_get(_bias_cache, symbol, 300)
@@ -1168,6 +1137,7 @@ def get_bias(symbol: str) -> Dict[str, Any]:
 
     d1_trend = "RANGING"
     h4_trend = "RANGING"
+    h1_trend = "RANGING"
     h4_levels = []
     htf_obs = []
 
@@ -1199,14 +1169,25 @@ def get_bias(symbol: str) -> Dict[str, Any]:
     except Exception as e:
         logger.warning("get_bias(H4) failed for %s: %s", symbol, e)
 
-    strong_buy  = (d1_trend == "BULLISH" and h4_trend == "BULLISH")
-    strong_sell = (d1_trend == "BEARISH" and h4_trend == "BEARISH")
+    try:
+        h1_df, _ = fetch_data_cached(symbol, "1h", ttl=300)
+        if h1_df is not None and len(h1_df) >= 50:
+            h1_df = find_swings(h1_df, "1h")
+            h1_struct = detect_structure(h1_df)
+            h1_trend = h1_struct["trend"]
+    except Exception as e:
+        logger.warning("get_bias(H1) failed for %s: %s", symbol, e)
+
+    strong_buy  = (d1_trend == "BULLISH" and h4_trend == "BULLISH" and h1_trend != "BEARISH")
+    strong_sell = (d1_trend == "BEARISH" and h4_trend == "BEARISH" and h1_trend != "BULLISH")
     weak_buy    = (d1_trend == "BULLISH" and h4_trend == "RANGING") or \
                   (d1_trend == "RANGING" and h4_trend == "BULLISH")
     weak_sell   = (d1_trend == "BEARISH" and h4_trend == "RANGING") or \
                   (d1_trend == "RANGING" and h4_trend == "BEARISH")
     conflict    = (d1_trend == "BULLISH" and h4_trend == "BEARISH") or \
-                  (d1_trend == "BEARISH" and h4_trend == "BULLISH")
+                  (d1_trend == "BEARISH" and h4_trend == "BULLISH") or \
+                  (h4_trend == "BULLISH" and h1_trend == "BEARISH") or \
+                  (h4_trend == "BEARISH" and h1_trend == "BULLISH")
     neutral     = (d1_trend == "RANGING" and h4_trend == "RANGING")
 
     allow_buy  = strong_buy  or weak_buy  or neutral
@@ -1221,17 +1202,16 @@ def get_bias(symbol: str) -> Dict[str, Any]:
     elif weak_sell:
         tier, reason = "WEAK", f"Partial BEARISH (D1={d1_trend}, H4={h4_trend}) — SELL at reduced size"
     elif conflict:
-        tier, reason = "CONFLICT", f"HTF CONFLICT (D1={d1_trend}, H4={h4_trend}) — no trade"
+        tier, reason = "CONFLICT", f"HTF CONFLICT (D1={d1_trend}, H4={h4_trend}, H1={h1_trend}) — no trade"
     else:
         tier, reason = "NEUTRAL", "D1 + H4 both RANGING — range conditions, MSS required"
 
-    result = {"d1_trend": d1_trend, "h4_trend": h4_trend,
+    result = {"d1_trend": d1_trend, "h4_trend": h4_trend, "h1_trend": h1_trend,
               "h4_levels": h4_levels, "htf_obs": htf_obs,
               "allow_buy": allow_buy, "allow_sell": allow_sell,
               "tier": tier, "reason": reason}
     _cache_set(_bias_cache, symbol, result)
     return result
-
 
 def pick_tp_swing(structure: Dict[str, Any], entry: float, direction: str) -> Tuple[Optional[float], Optional[float]]:
     highs = sorted([h["price"] for h in structure.get("swing_highs", []) if h["price"] > 0])
@@ -1252,20 +1232,23 @@ def pick_tp_swing(structure: Dict[str, Any], entry: float, direction: str) -> Tu
             return tp1, tp2
         return None, None
 
-
 SCORE_WEIGHTS_EXACT = {
     "MSS Confirmed": 3,
     "HTF Bias": 2,
     "In Killzone": 2,
     "Displacement": 2,
     "OB Fresh": 2,
+    "Sequence Valid": 2, 
+    "Session Sweep": 2,  
+    "Unicorn Zone": 2, 
+    "Daily Open Align": 1, 
+    "Strong Displacement": 2, 
 }
 SCORE_WEIGHTS_PREFIX = {
     "Sweep of ": 2,
     "Price in ": 2,
     "R:R": 1,
 }
-
 
 def score_checklist(checklist: List[Dict[str, Any]]) -> int:
     pts = 0
@@ -1282,10 +1265,9 @@ def score_checklist(checklist: List[Dict[str, Any]]) -> int:
                 break
     return pts
 
-
 def build_checklist(direction: str, mss: Optional[dict], bias: Optional[dict],
                     pd: Optional[dict], killzone_ok: bool, zone: dict,
-                    rr: float, sweep: Optional[dict] = None) -> List[Dict[str, Any]]:
+                    rr: float, sweep: Optional[dict] = None, sessions: Optional[dict] = None, atr: float = 1.0, daily_open: Optional[float] = None, is_unicorn: bool = False) -> List[Dict[str, Any]]:
     checklist = []
 
     bias_tier = bias.get("tier", "NEUTRAL") if bias else "UNKNOWN"
@@ -1356,8 +1338,49 @@ def build_checklist(direction: str, mss: Optional[dict], bias: Optional[dict],
         "detail": f"1 : {rr:.2f}"
     })
 
-    return checklist
+    seq_ok = False
+    seq_detail = "No Sweep/MSS"
+    if mss and sweep and sweep.get("latest"):
+        mss_idx = mss.get("break_index", 0)
+        sweep_idx = sweep["latest"]["index"]
+        if sweep_idx < mss_idx and (mss_idx - sweep_idx) <= 15:
+            seq_ok = True
+            seq_detail = f"Valid ({mss_idx - sweep_idx} bars)"
+        elif sweep_idx < mss_idx:
+            seq_detail = f"Sweep too old ({mss_idx - sweep_idx} bars)"
+    checklist.append({"label": "Sequence Valid", "pass": seq_ok, "detail": seq_detail})
 
+    sess_sweep = False
+    sess_detail = "No session swept"
+    if sweep and sweep.get("latest") and sessions:
+        swept_px = sweep["latest"]["swept_price"]
+        tol = atr * 0.2
+        if "ASIA" in sessions:
+            if abs(swept_px - sessions["ASIA"]["high"]) <= tol:
+                sess_sweep = True
+                sess_detail = "Swept Asia High"
+            elif abs(swept_px - sessions["ASIA"]["low"]) <= tol:
+                sess_sweep = True
+                sess_detail = "Swept Asia Low"
+        if not sess_sweep and "LONDON" in sessions:
+            if abs(swept_px - sessions["LONDON"]["high"]) <= tol:
+                sess_sweep = True
+                sess_detail = "Swept London High"
+            elif abs(swept_px - sessions["LONDON"]["low"]) <= tol:
+                sess_sweep = True
+                sess_detail = "Swept London Low"
+    checklist.append({"label": "Session Sweep", "pass": sess_sweep, "detail": sess_detail})
+
+    checklist.append({"label": "Unicorn Zone", "pass": is_unicorn, "detail": "OB+FVG Overlap" if is_unicorn else "No overlap"})
+
+    if daily_open:
+        do_ok = (direction == "BUY" and zone.get("top", 0) > daily_open) or (direction == "SELL" and zone.get("bottom", 0) < daily_open)
+        checklist.append({"label": "Daily Open Align", "pass": do_ok, "detail": f"Open: {fmt_price(daily_open)}"})
+
+    weak_wick = (mss and mss.get("quality") == "weak")
+    checklist.append({"label": "Strong Displacement", "pass": not weak_wick, "detail": "Weak wick detected" if weak_wick else "Clean body"})
+
+    return checklist
 
 def detect_smt_divergence(symbol: str, timeframe: str, structure: Dict[str, Any]) -> str:
     if symbol.upper() != "XAUUSD":
@@ -1384,7 +1407,6 @@ def detect_smt_divergence(symbol: str, timeframe: str, structure: Dict[str, Any]
     if sl[-1]["price"] < sl[-2]["price"] and corr_sl[-1]["price"] > corr_sl[-2]["price"]:
         return "BULLISH SMT (XAUUSD LL, EURUSD HL)"
     return "NO DIVERGENCE DETECTED"
-
 
 def compute_ote_levels(structure: Dict[str, Any]) -> Optional[dict]:
     sh = structure.get("swing_highs", [])
@@ -1420,12 +1442,11 @@ def compute_ote_levels(structure: Dict[str, Any]) -> Optional[dict]:
         "label": "OTE Zone (61.8% - 79.0%)",
     }
 
-
 def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[dict],
                        fvgs: List[dict], pools: List[dict], pd_zones: Optional[dict],
                        timeframe: str, mss: Optional[dict] = None, symbol: str = "",
                        bias: Optional[dict] = None, killzone_ok: bool = True,
-                       sweep: Optional[dict] = None, use_ema_filter: bool = True) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[str]]:
+                       sweep: Optional[dict] = None, use_ema_filter: bool = True, sessions: Optional[dict] = None, daily_open: Optional[float] = None) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[str]]:
     atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
     current_price = safe_float(df["close"].values[-1])
 
@@ -1440,7 +1461,9 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
 
     warning_msg = None
 
-    # CHECK NEWS BLACKOUT
+    if "WEEKEND" in current_killzone(symbol) and symbol.upper() not in CRYPTO_SYMBOLS:
+        return None, None, None, None, None, None, "⚠️ BLOCKED: Market is closed (Weekend)."
+
     news_block = is_news_blackout(symbol)
     if news_block:
         return None, None, None, None, None, None, news_block
@@ -1450,7 +1473,48 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
 
     bias_tier = bias.get("tier", "NEUTRAL")
 
-    # Pre-MSS Setup Logic (Moved UP so it can fire BEFORE the MSS happens)
+    recent_high = safe_float(df["high"].tail(20).max())
+    recent_low = safe_float(df["low"].tail(20).min())
+    recent_range = recent_high - recent_low
+    
+    if recent_range < (atr * 2.5):
+        return None, None, None, None, None, None, "⚠️ BLOCKED: Market is ranging (Low Volatility)."
+
+    if use_ema_filter:
+        ema_200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
+        
+        if mss:
+            if mss["type"] == "MSS_BEAR" and current_price > ema_200:
+                warning_msg = "⚠️ BLOCKED SELL: Price is above 200 EMA (Bullish Momentum)"
+                return None, None, None, None, None, None, warning_msg
+                
+            if mss["type"] == "MSS_BULL" and current_price < ema_200:
+                warning_msg = "⚠️ BLOCKED BUY: Price is below 200 EMA (Bearish Momentum)"
+                return None, None, None, None, None, None, warning_msg
+        else:
+            if sweep and sweep.get("latest"):
+                latest = sweep["latest"]
+                if latest["type"] == "BSL_SWEEP" and current_price > ema_200:
+                    warning_msg = "⚠️ BLOCKED PRE-MSS SELL: Price is above 200 EMA"
+                    return None, None, None, None, None, None, warning_msg
+                if latest["type"] == "SSL_SWEEP" and current_price < ema_200:
+                    warning_msg = "⚠️ BLOCKED PRE-MSS BUY: Price is below 200 EMA"
+                    return None, None, None, None, None, None, warning_msg
+
+    dxy_trend = get_dxy_trend() if symbol.upper() == "XAUUSD" else "RANGING"
+    
+    if dxy_trend == "BULLISH":
+        if mss and mss["type"] == "MSS_BULL":
+            return None, None, None, None, None, None, "⚠️ BLOCKED BUY: DXY is strongly BULLISH."
+        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "SSL_SWEEP":
+            return None, None, None, None, None, None, "⚠️ BLOCKED PRE-MSS BUY: DXY is strongly BULLISH."
+            
+    if dxy_trend == "BEARISH":
+        if mss and mss["type"] == "MSS_BEAR":
+            return None, None, None, None, None, None, "⚠️ BLOCKED SELL: DXY is strongly BEARISH."
+        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "BSL_SWEEP":
+            return None, None, None, None, None, None, "⚠️ BLOCKED PRE-MSS SELL: DXY is strongly BEARISH."
+
     pre_mss_buy, pre_mss_sell = None, None
     if sweep and sweep.get("latest"):
         latest = sweep["latest"]
@@ -1465,22 +1529,8 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             if risk > 0:
                 pre_mss_sell = {"direction": "SELL", "entry": current_price, "sl": sl, "tp1": current_price - risk * 2.0, "tp2": current_price - risk * 3.0, "rr": 2.0, "zone_type": "PRE-MSS SWEEP", "confidence": "EARLY ENTRY", "zone_quality": 0, "checklist": [], "score": 0, "reasons": [], "sl_basis": "sweep wick", "tp_basis": "fixed 1:2"}
 
-    # If no MSS, return the Pre-MSS setups (if any) and stop here
     if not mss:
         return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
-
-    # 🛑 200 EMA HARD FILTER
-    if use_ema_filter:
-        ema_200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
-        current_price = df["close"].values[-1]
-
-        if mss["type"] == "MSS_BEAR" and current_price > ema_200:
-            warning_msg = "⚠️ BLOCKED SELL: Price is above 200 EMA (Bullish Momentum)"
-            return None, None, None, None, pre_mss_buy, None, warning_msg
-            
-        if mss["type"] == "MSS_BULL" and current_price < ema_200:
-            warning_msg = "⚠️ BLOCKED BUY: Price is below 200 EMA (Bearish Momentum)"
-            return None, None, None, None, None, pre_mss_sell, warning_msg
 
     recent = df.tail(3)
     displacement_bear = False
@@ -1531,7 +1581,15 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             if not mss_ok:
                 return None
 
-        checklist = build_checklist(direction, mss, bias, pd_zones, killzone_ok, zone, rr, sweep=sweep)
+        is_unicorn = False
+        if "OB" in zone["label"]:
+            for f in fvgs:
+                if f["type"] == ("FVG_BULL" if direction == "BUY" else "FVG_BEAR"):
+                    if _ranges_overlap(zone["top"], zone["bottom"], f["top"], f["bottom"], threshold=0.5):
+                        is_unicorn = True
+                        break
+
+        checklist = build_checklist(direction, mss, bias, pd_zones, killzone_ok, zone, rr, sweep=sweep, sessions=sessions, atr=atr, daily_open=daily_open, is_unicorn=is_unicorn)
         pts = score_checklist(checklist)
 
         if pts >= 10:
@@ -1593,6 +1651,10 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             tp1, tp2 = pick_tp_swing(structure, entry, "BUY")
             if tp1 is None:
                 continue
+            
+            pdh, pdl = get_previous_day_hl(symbol)
+            if pdh and pdh > tp1 and pdh > tp2: tp2 = pdh
+
             setup = build_setup("BUY", zone, entry, sl, tp1, tp2)
             if setup:
                 if planned_buy is None:
@@ -1623,6 +1685,10 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             tp1, tp2 = pick_tp_swing(structure, entry, "SELL")
             if tp1 is None:
                 continue
+            
+            pdh, pdl = get_previous_day_hl(symbol)
+            if pdl and pdl < tp1 and pdl < tp2: tp2 = pdl
+
             setup = build_setup("SELL", zone, entry, sl, tp1, tp2)
             if setup:
                 if planned_sell is None:
@@ -1633,7 +1699,6 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                     break
 
     return buy_setup, sell_setup, planned_buy, planned_sell, pre_mss_buy, pre_mss_sell, warning_msg
-
 
 def compute_correlations(symbols: List[str], timeframe: str = '1h', lookback: int = 200) -> Dict[str, Any]:
     series: Dict[str, np.ndarray] = {}
@@ -1668,7 +1733,6 @@ def compute_correlations(symbols: List[str], timeframe: str = '1h', lookback: in
 
     return {'symbols': syms, 'matrix': matrix, 'timeframe': timeframe, 'basis': 'pct_change'}
 
-
 def _build_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> List[Dict[str, Any]]:
     candles = []
     df_tail = df.tail(400)
@@ -1701,7 +1765,6 @@ def _build_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> List[Dict[s
             logger.debug("forming candle append failed: %s", e)
     return candles
 
-
 def _build_swing_markers(df: pd.DataFrame, swings: List[dict]) -> List[Dict[str, Any]]:
     markers = []
     for s in swings:
@@ -1714,7 +1777,6 @@ def _build_swing_markers(df: pd.DataFrame, swings: List[dict]) -> List[Dict[str,
             except Exception:
                 continue
     return markers
-
 
 def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> Dict[str, Any]:
     df, live_px, used_source, is_tick = _fetch_with_live_cached(symbol, timeframe)
@@ -1738,11 +1800,11 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
 
     pdh, pdl = get_previous_day_hl(symbol)
     sessions = get_session_ranges(df, symbol, timeframe)
+    daily_open = get_daily_open(symbol)
 
     killzone_ok = in_killzone(symbol)
     bias = get_bias(symbol)
 
-    # NEW: BOS Continuation Logic
     if not mss and bias and bias.get("tier") in ("STRONG", "WEAK"):
         bos = structure.get("bos")
         if bos:
@@ -1756,7 +1818,7 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
 
     buy_setup, sell_setup, planned_buy, planned_sell, pre_mss_buy, pre_mss_sell, warning_msg = generate_scenarios(
         df, structure, obs, fvgs, pools, pd_zones, timeframe, mss,
-        symbol=symbol, bias=bias, killzone_ok=killzone_ok, sweep=sweep, use_ema_filter=use_ema_filter
+        symbol=symbol, bias=bias, killzone_ok=killzone_ok, sweep=sweep, use_ema_filter=use_ema_filter, sessions=sessions, daily_open=daily_open
     )
     killzone = current_killzone(symbol)
 
@@ -1817,38 +1879,42 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                          "swept_price": safe_float(latest["swept_price"]),
                          "index": safe_int(latest["index"])}
 
-    # ---------- TELEGRAM ALERTS ----------
     with _alert_lock:
         if len(_sent_alerts) > 1000:
             _sent_alerts.clear()
 
-        # News Blackout Alert
         if warning_msg and "NEWS BLACKOUT" in warning_msg:
             alert_key = f"{symbol}_news_blackout_{datetime.now(timezone.utc).strftime('%Y%m%d%H')}"
             if alert_key not in _sent_alerts:
                 _sent_alerts.add(alert_key)
                 send_telegram_alert(f"🛑 *{symbol} - MACRO WARNING* 🛑\n\n{warning_msg}\n\n_Scanner is locked. Do not trade._")
 
-        # 1. Pre-MSS Alerts
         for setup in [pre_mss_buy, pre_mss_sell]:
             if setup:
+                if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
+                    logger.warning(f"Skipping alert for {symbol} - Invalid entry price {setup['entry']}")
+                    continue
                 alert_key = f"{symbol}_pre_mss_{setup['direction']}_{setup['entry']:.2f}"
                 if alert_key not in _sent_alerts:
                     _sent_alerts.add(alert_key)
                     emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
-                    send_telegram_alert(f"⚡ *{symbol} - {emoji} PRE-MSS SWEEP* ⚡\n\nEntry: {fmt_price(setup['entry'])}\nSL: {fmt_price(setup['sl'])}\nTP1: {fmt_price(setup['tp1'])}\nR:R: 1 : 2.00\n\n⚠️ _EARLY ENTRY. High Risk. Wait for MSS if unsure._\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']})")
+                    send_telegram_alert(f"⚡ *{symbol} - {emoji} PRE-MSS SWEEP* ⚡\n\nEntry: {fmt_price(setup['entry'])}\nSL: {fmt_price(setup['sl'])}\nTP1: {fmt_price(setup['tp1'])}\nR:R: 1 : 2.00\n\n⚠️ _EARLY ENTRY. High Risk. Wait for MSS if unsure._\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})")
 
-        # 2. MSS / BOS Alert
         if mss_out:
-            alert_key = f"{symbol}_mss_{mss_out['break_index']}_{mss_out['type']}"
-            if alert_key not in _sent_alerts:
-                _sent_alerts.add(alert_key)
-                signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
-                send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']})\nSession: {killzone}\n\n👉 _Open scanner to check for setup._")
+            if symbol.upper() == "XAUUSD" and mss_out["level"] < 1000:
+                logger.warning(f"Skipping MSS alert for {symbol} - Invalid level {mss_out['level']}")
+            else:
+                alert_key = f"{symbol}_mss_{mss_out['break_index']}_{mss_out['type']}"
+                if alert_key not in _sent_alerts:
+                    _sent_alerts.add(alert_key)
+                    signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
+                    send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Open scanner to check for setup._")
 
-        # 3. Planned / Active Setup Alert
         for setup in [buy_setup, sell_setup, planned_buy, planned_sell]:
             if setup:
+                if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
+                    logger.warning(f"Skipping setup alert for {symbol} - Invalid entry price {setup['entry']}")
+                    continue
                 alert_key = f"{symbol}_{setup['direction']}_{setup['entry']:.2f}"
                 if alert_key not in _sent_alerts:
                     _sent_alerts.add(alert_key)
@@ -1867,7 +1933,7 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                         f"TP1: {fmt_price(setup['tp1'])}\n"
                         f"R:R: 1 : {setup['rr']:.2f}\n\n"
                         f"Zone: {setup['zone_type']}\n"
-                        f"Bias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']})"
+                        f"Bias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})"
                     )
                     send_telegram_alert(setup_msg)
 
@@ -1899,10 +1965,10 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
         "swing_low_markers": sl_markers,
         "smt_divergence": smt_result,
         "ote_levels": ote_result,
+        "daily_open": daily_open,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "data_source": used_source,
     }
-
 
 def analyze(symbol: str, timeframe: str, use_ema_filter: bool = True) -> Dict[str, Any]:
     try:
@@ -1915,6 +1981,55 @@ def analyze(symbol: str, timeframe: str, use_ema_filter: bool = True) -> Dict[st
             "timeframe": timeframe,
         }
 
+def generate_pre_market_plan(symbol: str):
+    logger.info(f"Generating Pre-Market Plan for {symbol}...")
+    bias = get_bias(symbol)
+    pdh, pdl = get_previous_day_hl(symbol)
+    daily_open = get_daily_open(symbol)
+    
+    d1_df, _ = fetch_data_cached(symbol, "1d", ttl=1800)
+    h4_df, _ = fetch_data_cached(symbol, "4h", ttl=300)
+    
+    last_price = 0.0
+    if d1_df is not None and not d1_df.empty:
+        last_price = safe_float(d1_df["close"].values[-1])
+
+    htf_obs = bias.get("htf_obs", [])
+    htf_obs = sorted(htf_obs, key=lambda x: abs(x["top"] - last_price) if x["type"]=="OB_BULL" else abs(x["bottom"] - last_price))
+
+    res_msg = f"📋 *PRE-MARKET GAME PLAN: {symbol}* 📋\n\n"
+    res_msg += f"Current Price: `{fmt_price(last_price)}`\n"
+    res_msg += f"Daily Open: `{fmt_price(daily_open) if daily_open else 'N/A'}`\n"
+    res_msg += f"D1 Trend: *{bias['d1_trend']}*\n"
+    res_msg += f"H4 Trend: *{bias['h4_trend']}*\n"
+    res_msg += f"H1 Trend: *{bias['h1_trend']}*\n"
+    res_msg += f"Bias Tier: *{bias['tier']}*\n\n"
+    
+    if pdh and pdl:
+        res_msg += f"🔑 *Key Levels:*\n"
+        res_msg += f"PDH: `{fmt_price(pdh)}`\n"
+        res_msg += f"PDL: `{fmt_price(pdl)}`\n\n"
+        
+    if htf_obs:
+        res_msg += f"🎯 *Nearest HTF Zones:*\n"
+        for ob in htf_obs[:3]:
+            zone_type = "Supply (Sell)" if ob["type"] == "OB_BEAR" else "Demand (Buy)"
+            top = fmt_price(ob["top"])
+            bot = fmt_price(ob["bottom"])
+            res_msg += f"- {ob['tf']} {zone_type}: `{bot} - {top}`\n"
+        res_msg += "\n"
+        
+    res_msg += f"🧠 *Game Plan:*\n"
+    if bias['tier'] == "STRONG":
+        res_msg += f"Look for 15m MSS in direction of the trend. Target the next HTF zone. Do not counter-trend."
+    elif bias['tier'] == "CONFLICT":
+        res_msg += f"HTF Conflict detected. Wait for H1 and H4 to align before taking trades."
+    else:
+        res_msg += f"Market is ranging. Wait for price to sweep PDH/PDL or HTF zones. Use the scanner for precise MSS entries."
+
+    send_telegram_alert(res_msg)
+    logger.info("Pre-Market Plan sent to Telegram.")
+    return res_msg
 
 def _run_structural_tests():
     np.random.seed(42)
@@ -1964,8 +2079,13 @@ def _run_structural_tests():
         {"label": "Displacement", "pass": True, "detail": ""},
         {"label": "OB Fresh", "pass": True, "detail": ""},
         {"label": "R:R >= 2.0", "pass": True, "detail": ""},
+        {"label": "Sequence Valid", "pass": True, "detail": ""},
+        {"label": "Session Sweep", "pass": True, "detail": ""},
+        {"label": "Unicorn Zone", "pass": True, "detail": ""},
+        {"label": "Daily Open Align", "pass": True, "detail": ""},
+        {"label": "Strong Displacement", "pass": True, "detail": ""},
     ]
-    assert score_checklist(fake_checklist) == 16, f"got {score_checklist(fake_checklist)}"
+    assert score_checklist(fake_checklist) == 25, f"got {score_checklist(fake_checklist)}"
 
     assert "US100" in INSTRUMENT_MAP
     assert "US100" in YF_FALLBACK
@@ -2060,7 +2180,7 @@ def _run_golden_fixture_test(mod):
     assert any(f["type"] == "FVG_BULL" for f in fvgs), "expected FVG_BULL"
 
     neutral_bias = {
-        "d1_trend": "RANGING", "h4_trend": "RANGING",
+        "d1_trend": "RANGING", "h4_trend": "RANGING", "h1_trend": "RANGING",
         "h4_levels": [], "htf_obs": [],
         "allow_buy": True, "allow_sell": True,
         "tier": "NEUTRAL", "reason": "mock",
@@ -2070,7 +2190,8 @@ def _run_golden_fixture_test(mod):
                            return_value=(golden_df.copy(), None, "GOLDEN", False)), \
          mock.patch.object(mod, "fetch_data_cached",
                            return_value=(golden_df.copy(), "GOLDEN")), \
-         mock.patch.object(mod, "get_bias", return_value=neutral_bias):
+         mock.patch.object(mod, "get_bias", return_value=neutral_bias), \
+         mock.patch.object(mod, "get_dxy_trend", return_value="RANGING"):
         result = analyze("XAUUSD", "15m")
 
     assert "error" not in result, f"analyze failed: {result.get('error')}"
@@ -2110,8 +2231,8 @@ def _run_sweep_per_side_test():
     assert sweep["latest"]["index"] == 22, "latest should be ssl (bar 22)"
 
     zone = {"quality": 2.5, "touches": 0}
-    buy_cl = build_checklist("BUY", None, None, None, True, zone, 2.0, sweep=sweep)
-    sell_cl = build_checklist("SELL", None, None, None, True, zone, 2.0, sweep=sweep)
+    buy_cl = build_checklist("BUY", None, None, None, True, zone, 2.0, sweep=sweep, sessions={}, atr=1.0)
+    sell_cl = build_checklist("SELL", None, None, None, True, zone, 2.0, sweep=sweep, sessions={}, atr=1.0)
 
     buy_sweep = next(c for c in buy_cl if c["label"].startswith("Sweep of"))
     sell_sweep = next(c for c in sell_cl if c["label"].startswith("Sweep of"))
@@ -2176,7 +2297,7 @@ def _run_analyze_test(mod):
     }, index=pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC"))
 
     fake_bias = {
-        "d1_trend": "BULLISH", "h4_trend": "BULLISH",
+        "d1_trend": "BULLISH", "h4_trend": "BULLISH", "h1_trend": "BULLISH",
         "h4_levels": [], "htf_obs": [],
         "allow_buy": True, "allow_sell": False,
         "tier": "STRONG", "reason": "mock",
@@ -2186,7 +2307,8 @@ def _run_analyze_test(mod):
                            return_value=(mock_df.copy(), 2050.0, "MOCK", False)), \
          mock.patch.object(mod, "fetch_data_cached",
                            return_value=(mock_df.copy(), "MOCK")), \
-         mock.patch.object(mod, "get_bias", return_value=fake_bias):
+         mock.patch.object(mod, "get_bias", return_value=fake_bias), \
+         mock.patch.object(mod, "get_dxy_trend", return_value="RANGING"):
         result = analyze("XAUUSD", "15m")
 
     assert isinstance(result, dict), "analyze must return dict"
@@ -2223,3 +2345,5 @@ def _run_smoke_test():
 if __name__ == "__main__":
     if "--test" in sys.argv:
         _run_smoke_test()
+    elif "--plan" in sys.argv:
+        generate_pre_market_plan("XAUUSD")
