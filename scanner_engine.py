@@ -17,7 +17,7 @@ REVISION 5.3 (Visual DXY + Pure Momentum):
   # USER CUSTOM 13 - Added Unicorn Setup (OB+FVG Overlap).
   # USER CUSTOM 14 - Added Rejection Wick filter.
   # USER CUSTOM 15 - TP targets prioritize Liquidity Pools and PDH/PDL.
-  # USER CUSTOM 16 - INSTANT Entry on MSS close. Bypasses checklist score. 
+  # USER CUSTOM 16 - INSTANT Entry on MSS close. Bypasses checklist score & H4 Bias. 
   # USER CUSTOM 17 - REMOVED 200 EMA Filter completely. 
   # USER CUSTOM 18 - Changed SMT Divergence correlation from EURUSD to XAGUSD.
   # FIX #18 - Hard Weekend Blocker & Telegram Alert Sanity Checks.
@@ -1608,35 +1608,38 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     planned_sell = None
 
     # ==========================================
-    # INSTANT MSS ENTRY (FORCED)
+    # INSTANT MSS ENTRY (FORCED - IGNORES H4 BIAS)
     # ==========================================
     if mss:
         direction = "BUY" if mss["type"] == "MSS_BULL" else "SELL"
-        if (direction == "BUY" and allow_buy) or (direction == "SELL" and allow_sell):
-            entry = current_price
+        
+        # REMOVED THE allow_buy / allow_sell CHECK HERE
+        # It will now fire instantly in BOTH directions.
+        
+        entry = current_price
+        
+        if direction == "BUY":
+            sl = mss["level"] - (atr * 0.3)
+            risk = entry - sl
+        else:
+            sl = mss["level"] + (atr * 0.3)
+            risk = sl - entry
+
+        if risk > 0 and risk <= max_risk:
+            tp1 = entry + (risk * 2.0) if direction == "BUY" else entry - (risk * 2.0)
             
-            if direction == "BUY":
-                sl = mss["level"] - (atr * 0.3)
-                risk = entry - sl
-            else:
-                sl = mss["level"] + (atr * 0.3)
-                risk = sl - entry
+            pdh, pdl = get_previous_day_hl(symbol)
+            liq_tp1, _ = pick_tp_liquidity(pools, structure, entry, direction, pdh, pdl)
+            tp2 = liq_tp1 if liq_tp1 is not None else (entry + (risk * 3.0) if direction == "BUY" else entry - (risk * 3.0))
 
-            if risk > 0 and risk <= max_risk:
-                tp1 = entry + (risk * 2.0) if direction == "BUY" else entry - (risk * 2.0)
-                
-                pdh, pdl = get_previous_day_hl(symbol)
-                liq_tp1, _ = pick_tp_liquidity(pools, structure, entry, direction, pdh, pdl)
-                tp2 = liq_tp1 if liq_tp1 is not None else (entry + (risk * 3.0) if direction == "BUY" else entry - (risk * 3.0))
-
-                virtual_zone = {"label": f"INSTANT {mss['type']}", "quality": 2.0, "touches": 0, "top": max(entry, sl), "bottom": min(entry, sl)}
-                
-                instant_setup = build_setup(direction, virtual_zone, entry, sl, tp1, tp2, force_instant=True)
-                if instant_setup:
-                    if direction == "BUY":
-                        buy_setup = instant_setup
-                    else:
-                        sell_setup = instant_setup
+            virtual_zone = {"label": f"INSTANT {mss['type']}", "quality": 2.0, "touches": 0, "top": max(entry, sl), "bottom": min(entry, sl)}
+            
+            instant_setup = build_setup(direction, virtual_zone, entry, sl, tp1, tp2, force_instant=True)
+            if instant_setup:
+                if direction == "BUY":
+                    buy_setup = instant_setup
+                else:
+                    sell_setup = instant_setup
 
     # Calculate Pullback plans for the UI
     if allow_buy:
