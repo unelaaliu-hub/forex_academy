@@ -1,23 +1,25 @@
 """
 Live Chart Scanner — OANDA with yfinance fallback
 
-REVISION 4 (Institutional Grade):
+REVISION 5 (Aggressive Momentum + Silver SMT):
   # USER CUSTOM 1 — Hardcoded OANDA API Key.
   # USER CUSTOM 2 — MIN_RR set to 2.0 (strict 1:2 R:R).
   # USER CUSTOM 3 — Weekend check added to killzone logic.
   # USER CUSTOM 4 — Telegram Alert Integration.
   # USER CUSTOM 5 — Telegram now alerts on ALL planned setups.
-  # USER CUSTOM 6 — Removed PRE-MSS alerts. Added INSTANT MSS entry (Market Execution).
+  # USER CUSTOM 6 — Removed PRE-MSS alerts. Added INSTANT MSS entry.
   # USER CUSTOM 7 — Added Biquote News Blackout filter.
-  # USER CUSTOM 8 - Added BOS Continuation logic (Trend Riding).
-  # USER CUSTOM 9 - Added H1 Trend Check & Chop Filter to eliminate false signals.
-  # USER CUSTOM 10 - Added DXY Correlation Filter for XAUUSD (Guards MSS and Pre-MSS).
+  # USER CUSTOM 8 - Added BOS Continuation logic.
+  # USER CUSTOM 9 - ADDED H1 Trend Check.
+  # USER CUSTOM 10 - REMOVED DXY Correlation Filter (Instant MSS Overrides).
   # USER CUSTOM 11 - Added Pre-Market Game Plan generator (CLI flag --plan).
-  # USER CUSTOM 12 - Added Sequence Enforcer and Session Sweep filters to Checklist.
+  # USER CUSTOM 12 - Added Sequence Enforcer and Session Sweep filters.
   # USER CUSTOM 13 - Added Unicorn Setup (OB+FVG Overlap) & Daily Open Alignment.
-  # USER CUSTOM 14 - Added Rejection Wick filter & Daily Draw on Liquidity (TP2).
-  # USER CUSTOM 15 - TP targets now prioritize Liquidity Pools (BSL/SSL) and PDH/PDL.
-  # USER CUSTOM 16 - Instant Entry on MSS close + 1:2 TP1 + Liquidity TP2.
+  # USER CUSTOM 14 - Added Rejection Wick filter & Daily Draw on Liquidity.
+  # USER CUSTOM 15 - TP targets prioritize Liquidity Pools and PDH/PDL.
+  # USER CUSTOM 16 - INSTANT Entry on MSS close + 1:2 TP1 + Liquidity TP2. 
+  # USER CUSTOM 17 - REMOVED 200 EMA Filter completely. 
+  # USER CUSTOM 18 - Changed SMT Divergence correlation from EURUSD to XAGUSD.
   # FIX #18 - Hard Weekend Blocker & Telegram Alert Sanity Checks.
 """
 import os
@@ -154,7 +156,7 @@ INSTRUMENT_MAP = {
     "XAUUSD": "XAU_USD", "EURUSD": "EUR_USD", "GBPUSD": "GBP_USD",
     "USDJPY": "USD_JPY", "AUDUSD": "AUD_USD", "BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD",
     "NAS100": "NAS100_USD", "US100": "NAS100_USD", "US30": "US30_USD", "JPN225": "JP225_USD",
-    "DXY": "USD_INDEX"
+    "XAGUSD": "XAG_USD", "DXY": "USD_INDEX"
 }
 GRANULARITY_MAP = {"15m": "M15", "1h": "H1", "4h": "H4", "1d": "D"}
 
@@ -162,7 +164,7 @@ YF_FALLBACK = {
     "XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X", "AUDUSD": "AUDUSD=X", "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
     "NAS100": "NQ=F", "US100": "NQ=F", "US30": "YM=F", "JPN225": "^N225",
-    "DXY": "DX-Y.NYB"
+    "XAGUSD": "SI=F", "DXY": "DX-Y.NYB"
 }
 YF_PERIOD = {"15m": "60d", "1h": "180d", "4h": "730d", "1d": "5y"}
 
@@ -1121,17 +1123,6 @@ def premium_discount(df: pd.DataFrame, structure: Dict[str, Any],
             "position": "PREMIUM" if px > mid else "DISCOUNT",
             "current_price": px}
 
-def get_dxy_trend() -> str:
-    try:
-        dxy_df, _ = fetch_data_cached("DXY", "1h", ttl=300)
-        if dxy_df is not None and len(dxy_df) >= 50:
-            dxy_df = find_swings(dxy_df, "1h")
-            dxy_struct = detect_structure(dxy_df)
-            return dxy_struct["trend"]
-    except Exception as e:
-        logger.warning(f"Failed to fetch DXY trend: {e}")
-    return "RANGING"
-
 def get_bias(symbol: str) -> Dict[str, Any]:
     cached = _cache_get(_bias_cache, symbol, 300)
     if cached is not None:
@@ -1408,10 +1399,10 @@ def detect_smt_divergence(symbol: str, timeframe: str, structure: Dict[str, Any]
     if symbol.upper() != "XAUUSD":
         return "N/A - Only for XAUUSD"
 
-    corr_symbol = "EURUSD"
+    corr_symbol = "XAGUSD"  # Changed from EURUSD to XAGUSD
     corr_df, _ = fetch_data_cached(corr_symbol, timeframe, ttl=300)
     if corr_df is None or len(corr_df) < 50:
-        return "NO DATA (EURUSD)"
+        return "NO DATA (XAGUSD)"
 
     corr_df = find_swings(corr_df, timeframe)
     corr_structure = detect_structure(corr_df)
@@ -1425,9 +1416,9 @@ def detect_smt_divergence(symbol: str, timeframe: str, structure: Dict[str, Any]
         return "INSUFFICIENT SWINGS"
 
     if sh[-1]["price"] > sh[-2]["price"] and corr_sh[-1]["price"] < corr_sh[-2]["price"]:
-        return "BEARISH SMT (XAUUSD HH, EURUSD LH)"
+        return "BEARISH SMT (XAUUSD HH, XAGUSD LH)"
     if sl[-1]["price"] < sl[-2]["price"] and corr_sl[-1]["price"] > corr_sl[-2]["price"]:
-        return "BULLISH SMT (XAUUSD LL, EURUSD HL)"
+        return "BULLISH SMT (XAUUSD LL, XAGUSD HL)"
     return "NO DIVERGENCE DETECTED"
 
 def compute_ote_levels(structure: Dict[str, Any]) -> Optional[dict]:
@@ -1501,41 +1492,6 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     
     if recent_range < (atr * 2.5):
         return None, None, None, None, None, None, "⚠️ BLOCKED: Market is ranging (Low Volatility)."
-
-    if use_ema_filter:
-        ema_200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
-        
-        if mss:
-            if mss["type"] == "MSS_BEAR" and current_price > ema_200:
-                warning_msg = "⚠️ BLOCKED SELL: Price is above 200 EMA (Bullish Momentum)"
-                return None, None, None, None, None, None, warning_msg
-                
-            if mss["type"] == "MSS_BULL" and current_price < ema_200:
-                warning_msg = "⚠️ BLOCKED BUY: Price is below 200 EMA (Bearish Momentum)"
-                return None, None, None, None, None, None, warning_msg
-        else:
-            if sweep and sweep.get("latest"):
-                latest = sweep["latest"]
-                if latest["type"] == "BSL_SWEEP" and current_price > ema_200:
-                    warning_msg = "⚠️ BLOCKED PRE-MSS SELL: Price is above 200 EMA"
-                    return None, None, None, None, None, None, warning_msg
-                if latest["type"] == "SSL_SWEEP" and current_price < ema_200:
-                    warning_msg = "⚠️ BLOCKED PRE-MSS BUY: Price is below 200 EMA"
-                    return None, None, None, None, None, None, warning_msg
-
-    dxy_trend = get_dxy_trend() if symbol.upper() == "XAUUSD" else "RANGING"
-    
-    if dxy_trend == "BULLISH":
-        if mss and mss["type"] == "MSS_BULL":
-            return None, None, None, None, None, None, "⚠️ BLOCKED BUY: DXY is strongly BULLISH."
-        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "SSL_SWEEP":
-            return None, None, None, None, None, None, "⚠️ BLOCKED PRE-MSS BUY: DXY is strongly BULLISH."
-            
-    if dxy_trend == "BEARISH":
-        if mss and mss["type"] == "MSS_BEAR":
-            return None, None, None, None, None, None, "⚠️ BLOCKED SELL: DXY is strongly BEARISH."
-        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "BSL_SWEEP":
-            return None, None, None, None, None, None, "⚠️ BLOCKED PRE-MSS SELL: DXY is strongly BEARISH."
 
     if not mss:
         return None, None, None, None, None, None, warning_msg
@@ -1639,14 +1595,13 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     planned_sell = None
 
     # ==========================================
-    # NEW: INSTANT MSS ENTRY (Market Execution)
+    # INSTANT MSS ENTRY (Overrides DXY & EMA)
     # ==========================================
     if mss:
         direction = "BUY" if mss["type"] == "MSS_BULL" else "SELL"
         if (direction == "BUY" and allow_buy) or (direction == "SELL" and allow_sell):
             entry = current_price
             
-            # Calculate SL based on the MSS swing level + buffer
             if direction == "BUY":
                 sl = mss["level"] - (atr * 0.3)
                 risk = entry - sl
@@ -1655,10 +1610,8 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                 risk = sl - entry
 
             if risk > 0 and risk <= max_risk:
-                # Calculate TP1 (Strict 1:2)
                 tp1 = entry + (risk * 2.0) if direction == "BUY" else entry - (risk * 2.0)
                 
-                # Calculate TP2 (Liquidity)
                 pdh, pdl = get_previous_day_hl(symbol)
                 liq_tp1, _ = pick_tp_liquidity(pools, structure, entry, direction, pdh, pdl)
                 tp2 = liq_tp1 if liq_tp1 is not None else (entry + (risk * 3.0) if direction == "BUY" else entry - (risk * 3.0))
@@ -1931,8 +1884,6 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
             if alert_key not in _sent_alerts:
                 _sent_alerts.add(alert_key)
                 send_telegram_alert(f"🛑 *{symbol} - MACRO WARNING* 🛑\n\n{warning_msg}\n\n_Scanner is locked. Do not trade._")
-
-        # PRE-MSS TELEGRAM ALERTS REMOVED PER USER REQUEST
 
         if mss_out:
             if symbol.upper() == "XAUUSD" and mss_out["level"] < 1000:
@@ -2224,8 +2175,7 @@ def _run_golden_fixture_test(mod):
                            return_value=(golden_df.copy(), None, "GOLDEN", False)), \
          mock.patch.object(mod, "fetch_data_cached",
                            return_value=(golden_df.copy(), "GOLDEN")), \
-         mock.patch.object(mod, "get_bias", return_value=neutral_bias), \
-         mock.patch.object(mod, "get_dxy_trend", return_value="RANGING"):
+         mock.patch.object(mod, "get_bias", return_value=neutral_bias):
         result = analyze("XAUUSD", "15m")
 
     assert "error" not in result, f"analyze failed: {result.get('error')}"
@@ -2341,8 +2291,7 @@ def _run_analyze_test(mod):
                            return_value=(mock_df.copy(), 2050.0, "MOCK", False)), \
          mock.patch.object(mod, "fetch_data_cached",
                            return_value=(mock_df.copy(), "MOCK")), \
-         mock.patch.object(mod, "get_bias", return_value=fake_bias), \
-         mock.patch.object(mod, "get_dxy_trend", return_value="RANGING"):
+         mock.patch.object(mod, "get_bias", return_value=fake_bias):
         result = analyze("XAUUSD", "15m")
 
     assert isinstance(result, dict), "analyze must return dict"
