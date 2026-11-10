@@ -1,17 +1,17 @@
 """
 Live Chart Scanner — OANDA with yfinance fallback
 
-REVISION 5.1 (Pure Momentum):
+REVISION 5.3 (Visual DXY + Pure Momentum):
   # USER CUSTOM 1 — Hardcoded OANDA API Key.
   # USER CUSTOM 2 — MIN_RR set to 2.0 (strict 1:2 R:R).
   # USER CUSTOM 3 — Weekend check added to killzone logic.
   # USER CUSTOM 4 — Telegram Alert Integration.
-  # USER CUSTOM 5 — REMOVED pullback alerts from Telegram. Only INSTANT MSS fires.
+  # USER CUSTOM 5 — INSTANT MSS + PULLBACK Fallback Telegram Alerts.
   # USER CUSTOM 6 — Removed PRE-MSS alerts.
   # USER CUSTOM 7 — Added Biquote News Blackout filter.
   # USER CUSTOM 8 - Added BOS Continuation logic.
   # USER CUSTOM 9 - ADDED H1 Trend Check.
-  # USER CUSTOM 10 - REMOVED DXY Correlation Filter.
+  # USER CUSTOM 10 - REMOVED DXY Correlation Filter (Now purely visual on UI).
   # USER CUSTOM 11 - Added Pre-Market Game Plan generator.
   # USER CUSTOM 12 - Added Sequence Enforcer and Session Sweep filters.
   # USER CUSTOM 13 - Added Unicorn Setup (OB+FVG Overlap).
@@ -1206,6 +1206,17 @@ def get_bias(symbol: str) -> Dict[str, Any]:
     _cache_set(_bias_cache, symbol, result)
     return result
 
+def get_dxy_trend() -> str:
+    try:
+        dxy_df, _ = fetch_data_cached("DXY", "1h", ttl=300)
+        if dxy_df is not None and len(dxy_df) >= 50:
+            dxy_df = find_swings(dxy_df, "1h")
+            dxy_struct = detect_structure(dxy_df)
+            return dxy_struct["trend"]
+    except Exception as e:
+        logger.warning(f"Failed to fetch DXY trend: {e}")
+    return "RANGING"
+
 def pick_tp_liquidity(pools: List[dict], structure: Dict[str, Any], entry: float, direction: str, pdh: Optional[float], pdl: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
     """Prioritizes Liquidity Pools (BSL/SSL) and PDH/PDL for Take Profits."""
     targets = []
@@ -1799,6 +1810,7 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
     pdh, pdl = get_previous_day_hl(symbol)
     sessions = get_session_ranges(df, symbol, timeframe)
     daily_open = get_daily_open(symbol)
+    dxy_trend = get_dxy_trend()
 
     killzone_ok = in_killzone(symbol)
     bias = get_bias(symbol)
@@ -1897,8 +1909,7 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                     signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
                     send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Open scanner to check for setup._")
 
-        # ONLY ALERT FOR INSTANT MSS SETUPS (buy_setup and sell_setup)
-        for setup in [buy_setup, sell_setup]:
+        for setup in [buy_setup, sell_setup, planned_buy, planned_sell]:
             if setup:
                 if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
                     logger.warning(f"Skipping setup alert for {symbol} - Invalid entry price {setup['entry']}")
@@ -1934,6 +1945,7 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
         "live_price_is_tick": bool(is_tick),
         "structure": structure,
         "bias": bias,
+        "dxy_trend": dxy_trend,
         "mss": mss_out,
         "sweep": sweep_out,
         "pdh": pdh, "pdl": pdl,
