@@ -1,23 +1,23 @@
 """
 Live Chart Scanner — OANDA with yfinance fallback
 
-REVISION 5 (Aggressive Momentum + Silver SMT):
+REVISION 5.1 (Pure Momentum):
   # USER CUSTOM 1 — Hardcoded OANDA API Key.
   # USER CUSTOM 2 — MIN_RR set to 2.0 (strict 1:2 R:R).
   # USER CUSTOM 3 — Weekend check added to killzone logic.
   # USER CUSTOM 4 — Telegram Alert Integration.
-  # USER CUSTOM 5 — Telegram now alerts on ALL planned setups.
-  # USER CUSTOM 6 — Removed PRE-MSS alerts. Added INSTANT MSS entry.
+  # USER CUSTOM 5 — REMOVED pullback alerts from Telegram. Only INSTANT MSS fires.
+  # USER CUSTOM 6 — Removed PRE-MSS alerts.
   # USER CUSTOM 7 — Added Biquote News Blackout filter.
   # USER CUSTOM 8 - Added BOS Continuation logic.
   # USER CUSTOM 9 - ADDED H1 Trend Check.
-  # USER CUSTOM 10 - REMOVED DXY Correlation Filter (Instant MSS Overrides).
-  # USER CUSTOM 11 - Added Pre-Market Game Plan generator (CLI flag --plan).
+  # USER CUSTOM 10 - REMOVED DXY Correlation Filter.
+  # USER CUSTOM 11 - Added Pre-Market Game Plan generator.
   # USER CUSTOM 12 - Added Sequence Enforcer and Session Sweep filters.
-  # USER CUSTOM 13 - Added Unicorn Setup (OB+FVG Overlap) & Daily Open Alignment.
-  # USER CUSTOM 14 - Added Rejection Wick filter & Daily Draw on Liquidity.
+  # USER CUSTOM 13 - Added Unicorn Setup (OB+FVG Overlap).
+  # USER CUSTOM 14 - Added Rejection Wick filter.
   # USER CUSTOM 15 - TP targets prioritize Liquidity Pools and PDH/PDL.
-  # USER CUSTOM 16 - INSTANT Entry on MSS close + 1:2 TP1 + Liquidity TP2. 
+  # USER CUSTOM 16 - INSTANT Entry on MSS close. Bypasses checklist score. 
   # USER CUSTOM 17 - REMOVED 200 EMA Filter completely. 
   # USER CUSTOM 18 - Changed SMT Divergence correlation from EURUSD to XAGUSD.
   # FIX #18 - Hard Weekend Blocker & Telegram Alert Sanity Checks.
@@ -1399,7 +1399,7 @@ def detect_smt_divergence(symbol: str, timeframe: str, structure: Dict[str, Any]
     if symbol.upper() != "XAUUSD":
         return "N/A - Only for XAUUSD"
 
-    corr_symbol = "XAGUSD"  # Changed from EURUSD to XAGUSD
+    corr_symbol = "XAGUSD"
     corr_df, _ = fetch_data_cached(corr_symbol, timeframe, ttl=300)
     if corr_df is None or len(corr_df) < 50:
         return "NO DATA (XAGUSD)"
@@ -1528,7 +1528,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
         return None, None, None, None, None, None, warning_msg
 
     def build_setup(direction: str, zone: dict, entry: float, sl: float,
-                    tp1: float, tp2: float) -> Optional[dict]:
+                    tp1: float, tp2: float, force_instant: bool = False) -> Optional[dict]:
         risk = abs(entry - sl)
         if risk <= 0:
             return None
@@ -1537,7 +1537,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
         if rr < MIN_RR:
             return None
 
-        if bias_tier == "NEUTRAL":
+        if bias_tier == "NEUTRAL" and not force_instant:
             mss_ok = mss and (
                 (mss["type"] == "MSS_BULL" and direction == "BUY") or
                 (mss["type"] == "MSS_BEAR" and direction == "SELL")
@@ -1562,11 +1562,13 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             confidence = "MEDIUM"
         elif pts >= 4:
             confidence = "LOW"
+        elif force_instant:
+            confidence = "INSTANT"
         else:
             return None
 
         htf_bias_check = next((c for c in checklist if c["label"] == "HTF Bias"), None)
-        if htf_bias_check and not htf_bias_check["pass"]:
+        if htf_bias_check and not htf_bias_check["pass"] and not force_instant:
             if confidence == "HIGH":
                 confidence = "MEDIUM"
             elif confidence == "MEDIUM":
@@ -1595,7 +1597,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     planned_sell = None
 
     # ==========================================
-    # INSTANT MSS ENTRY (Overrides DXY & EMA)
+    # INSTANT MSS ENTRY (FORCED)
     # ==========================================
     if mss:
         direction = "BUY" if mss["type"] == "MSS_BULL" else "SELL"
@@ -1618,7 +1620,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
 
                 virtual_zone = {"label": f"INSTANT {mss['type']}", "quality": 2.0, "touches": 0, "top": max(entry, sl), "bottom": min(entry, sl)}
                 
-                instant_setup = build_setup(direction, virtual_zone, entry, sl, tp1, tp2)
+                instant_setup = build_setup(direction, virtual_zone, entry, sl, tp1, tp2, force_instant=True)
                 if instant_setup:
                     if direction == "BUY":
                         buy_setup = instant_setup
@@ -1895,7 +1897,8 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                     signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
                     send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Open scanner to check for setup._")
 
-        for setup in [buy_setup, sell_setup, planned_buy, planned_sell]:
+        # ONLY ALERT FOR INSTANT MSS SETUPS (buy_setup and sell_setup)
+        for setup in [buy_setup, sell_setup]:
             if setup:
                 if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
                     logger.warning(f"Skipping setup alert for {symbol} - Invalid entry price {setup['entry']}")
@@ -2175,7 +2178,8 @@ def _run_golden_fixture_test(mod):
                            return_value=(golden_df.copy(), None, "GOLDEN", False)), \
          mock.patch.object(mod, "fetch_data_cached",
                            return_value=(golden_df.copy(), "GOLDEN")), \
-         mock.patch.object(mod, "get_bias", return_value=neutral_bias):
+         mock.patch.object(mod, "get_bias", return_value=neutral_bias), \
+         mock.patch.object(mod, "get_dxy_trend", return_value="RANGING"):
         result = analyze("XAUUSD", "15m")
 
     assert "error" not in result, f"analyze failed: {result.get('error')}"
@@ -2291,7 +2295,8 @@ def _run_analyze_test(mod):
                            return_value=(mock_df.copy(), 2050.0, "MOCK", False)), \
          mock.patch.object(mod, "fetch_data_cached",
                            return_value=(mock_df.copy(), "MOCK")), \
-         mock.patch.object(mod, "get_bias", return_value=fake_bias):
+         mock.patch.object(mod, "get_bias", return_value=fake_bias), \
+         mock.patch.object(mod, "get_dxy_trend", return_value="RANGING"):
         result = analyze("XAUUSD", "15m")
 
     assert isinstance(result, dict), "analyze must return dict"
