@@ -37,6 +37,8 @@ REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # FIX #35 - Force tg_instant_setup generation on MSS. If risk <= 0 (price moved too fast), fallback to ATR risk.
   # FIX #36 - Moved Pre-MSS cleanup (FIX #30) to the top of generate_scenarios() so that early returns (like the 200 EMA filter) do not bypass the nullification logic.
   # FIX #37 - Restored the basic MSS structural alert to Telegram alongside the Instant Setup.
+  # FIX #38 - Removed Pre-MSS Sweep Telegram alerts completely. Telegram ONLY receives the confirmed MSS Instant Setup. UI continues to show all boxes.
+  # FIX #39 - Added Weak MSS Rejection Filter. If the MSS candle has a massive wick (>40%), the bot sends a FAKEOUT WARNING instead of a setup, protecting against Judas Swings.
 """
 import os
 import sys
@@ -1500,7 +1502,6 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     if recent_range < (atr * 2.5):
         return None, None, None, None, None, None, "⚠️ BLOCKED: Market is ranging (Low Volatility)."
 
-    # FIX #36: Generate Pre-MSS setups FIRST, and nullify opposing directions immediately.
     pre_mss_buy, pre_mss_sell = None, None
     if sweep and sweep.get("latest"):
         latest = sweep["latest"]
@@ -1521,7 +1522,6 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
         elif mss["type"] == "MSS_BEAR":
             pre_mss_buy = None   # FIX #30 & #36
 
-    # Now apply filters
     if use_ema_filter:
         ema_200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
         
@@ -1952,7 +1952,8 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
         if mss_time is not None:
             mss_out = {"type": mss["type"], "level": safe_float(mss["level"]),
                        "description": mss["description"],
-                       "time": mss_time, "break_index": break_idx}
+                       "time": mss_time, "break_index": break_idx,
+                       "quality": mss.get("quality", "strong")}
 
     sweep_out = None
     if sweep and sweep.get("latest"):
@@ -1973,22 +1974,6 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                 _sent_alerts.add(alert_key)
                 send_telegram_alert(f"🛑 *{symbol} - MACRO WARNING* 🛑\n\n{warning_msg}\n\n_Scanner is locked. Do not trade._")
 
-        for setup in [pre_mss_buy, pre_mss_sell]:
-            if setup:
-                # FIX #33: Suppress Pre-MSS Sweep if an Instant MSS setup exists in the same direction.
-                if tg_instant_setup and setup['direction'] == tg_instant_setup['direction']:
-                    continue
-                    
-                if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
-                    logger.warning(f"Skipping alert for {symbol} - Invalid entry price {setup['entry']}")
-                    continue
-                alert_key = f"{symbol}_pre_mss_{setup['direction']}_{setup['entry']:.2f}"
-                if alert_key not in _sent_alerts:
-                    _sent_alerts.add(alert_key)
-                    emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
-                    send_telegram_alert(f"⚡ *{symbol} - {emoji} PRE-MSS SWEEP* ⚡\n\nEntry: {fmt_price(setup['entry'])}\nSL: {fmt_price(setup['sl'])}\nTP1: {fmt_price(setup['tp1'])}\nR:R: 1 : 2.00\n\n⚠️ _EARLY ENTRY. High Risk. Wait for MSS if unsure._\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})")
-
-        # FIX #37: Restored the MSS alert block for structural confirmation.
         if mss_out and not warning_msg:
             if symbol.upper() == "XAUUSD" and mss_out["level"] < 1000:
                 logger.warning(f"Skipping MSS alert for {symbol} - Invalid level {mss_out['level']}")
@@ -2000,9 +1985,14 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                 if alert_key not in _sent_alerts:
                     _sent_alerts.add(alert_key)
                     signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
-                    send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Setup alert below..._")
+                    
+                    # FIX #39: If MSS is weak, send Fakeout Warning instead of Setup.
+                    if mss_out.get("quality") == "weak":
+                        send_telegram_alert(f"⚠️ *{symbol} - {signal_label} (FAKEOUT WARNING)* ⚠️\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\n\n🛑 *Rejection Wick detected.*\n_This is likely a Judas Swing. No setup sent. Do not trade._")
+                        tg_instant_setup = None # Kill the setup
+                    else:
+                        send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Setup alert below..._")
 
-        # HYBRID ADDITION: tg_instant_setup is added here for Telegram ONLY
         if tg_instant_setup:
             tg_setups = [tg_instant_setup]
         else:
