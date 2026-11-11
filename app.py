@@ -35,7 +35,7 @@ def background_scanner():
             except Exception as e:
                 logger_bg.error(f"Crash on {symbol}: {e}")
             time.sleep(2) # 2 seconds between pairs
-        time.sleep(300) # Sleep 5 minutes before next full scan
+        time.sleep(15) # Sleep 15 seconds before next full scan
 
 # Start the bot in a background thread
 bot_thread = threading.Thread(target=background_scanner, daemon=True)
