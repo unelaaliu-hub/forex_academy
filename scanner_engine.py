@@ -33,6 +33,7 @@ REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # FIX #31 - Decoupled tg_instant_setup from warning_msg. The Instant Setup now bypasses EMA, DXY, and Displacement filters to fire immediately on MSS, unless hard-blocked by News or Weekend.
   # FIX #32 - Pre-MSS Sweeps now also bypass H4 bias. If a sweep happens, it fires the setup alert immediately, irrespective of D1/H4 trends.
   # FIX #33 - Suppress Pre-MSS Sweep Telegram alerts if an active MSS setup exists in the same direction.
+  # FIX #34 - Fixed tg_instant_setup deduplication bug. Now uses candle timestamp (mss_out['time']) instead of price level, preventing missed setups on repeated price levels.
 """
 import os
 import sys
@@ -2000,7 +2001,9 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                     continue
                 
                 if setup.get("confidence") == "INSTANT" and mss:
-                    alert_key = f"{symbol}_instant_{mss['type']}_{mss['level']:.4f}"
+                    # FIX #34: Use timestamp so same price level on different candles still fires
+                    mss_time_str = mss_out["time"] if mss_out and "time" in mss_out else "unknown"
+                    alert_key = f"{symbol}_instant_{mss['type']}_{mss['level']:.4f}_{mss_time_str}"
                 else:
                     alert_key = f"{symbol}_{setup['direction']}_{setup['entry']:.2f}"
                     
