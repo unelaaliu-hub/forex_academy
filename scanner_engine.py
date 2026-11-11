@@ -34,6 +34,7 @@ REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # FIX #32 - Pre-MSS Sweeps now also bypass H4 bias. If a sweep happens, it fires the setup alert immediately, irrespective of D1/H4 trends.
   # FIX #33 - Suppress Pre-MSS Sweep Telegram alerts if an active MSS setup exists in the same direction.
   # FIX #34 - Fixed tg_instant_setup deduplication bug. Now uses candle timestamp (mss_out['time']) instead of price level, preventing missed setups on repeated price levels.
+  # FIX #35 - Force tg_instant_setup generation on MSS. If risk <= 0 (price moved too fast), fallback to ATR risk. Removed basic MSS alert to prevent "Open scanner" spam.
 """
 import os
 import sys
@@ -1871,6 +1872,9 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
         if direction == "BUY":
             sl = mss["level"] - (atr * 0.3)
             risk = entry - sl
+            if risk <= 0:
+                risk = atr * 0.5
+                sl = entry - risk
             tp1 = entry + (risk * 2.0)
             
             bsl_targets = sorted([p["price"] for p in pools if p["type"] == "BSL" and p["price"] > tp1])
@@ -1879,18 +1883,20 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
         else:
             sl = mss["level"] + (atr * 0.3)
             risk = sl - entry
+            if risk <= 0:
+                risk = atr * 0.5
+                sl = entry + risk
             tp1 = entry - (risk * 2.0)
             
             ssl_targets = sorted([p["price"] for p in pools if p["type"] == "SSL" and p["price"] < tp1], reverse=True)
             tp2 = ssl_targets[0] if ssl_targets else entry - (risk * 3.0)
             tp_basis = "liquidity" if ssl_targets else "fixed 1:3"
 
-        if risk > 0:
-            tg_instant_setup = {
-                "direction": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": 2.0,
-                "zone_type": f"INSTANT {mss['type']}", "confidence": "INSTANT",
-                "checklist": [], "score": 10, "reasons": [], "sl_basis": "MSS level", "tp_basis": tp_basis
-            }
+        tg_instant_setup = {
+            "direction": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": 2.0,
+            "zone_type": f"INSTANT {mss['type']}", "confidence": "INSTANT",
+            "checklist": [], "score": 10, "reasons": [], "sl_basis": "MSS level", "tp_basis": tp_basis
+        }
     # ==========================================
 
     candles = _build_candles(df, symbol, timeframe)
@@ -1975,18 +1981,7 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                     emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
                     send_telegram_alert(f"⚡ *{symbol} - {emoji} PRE-MSS SWEEP* ⚡\n\nEntry: {fmt_price(setup['entry'])}\nSL: {fmt_price(setup['sl'])}\nTP1: {fmt_price(setup['tp1'])}\nR:R: 1 : 2.00\n\n⚠️ _EARLY ENTRY. High Risk. Wait for MSS if unsure._\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})")
 
-        if mss_out and not warning_msg:
-            if symbol.upper() == "XAUUSD" and mss_out["level"] < 1000:
-                logger.warning(f"Skipping MSS alert for {symbol} - Invalid level {mss_out['level']}")
-            else:
-                if "BOS" in mss_out["description"]:
-                    alert_key = f"{symbol}_bos_{mss_out['type']}_{mss_out['level']:.4f}"
-                else:
-                    alert_key = f"{symbol}_mss_{mss_out['time']}_{mss_out['type']}"
-                if alert_key not in _sent_alerts:
-                    _sent_alerts.add(alert_key)
-                    signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
-                    send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Open scanner to check for setup._")
+        # FIX #35: Removed basic MSS alert to prevent "Open scanner" spam. We only want setup alerts now.
 
         # HYBRID ADDITION: tg_instant_setup is added here for Telegram ONLY
         if tg_instant_setup:
