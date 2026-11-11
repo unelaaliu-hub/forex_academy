@@ -27,6 +27,10 @@ REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # FIX #25 - UI Planned boxes (conservative/aggressive) now render immediately on MSS irrespective of H4 bias.
   # FIX #26 - Fixed tg_instant_setup deduplication (uses static MSS level/type instead of shifting live price to stop 30s alert spam).
   # FIX #27 - Fixed UI box generation. The zone loop now explicitly triggers on MSS so boxes render even if bias.allow_buy/allow_sell is False.
+  # FIX #28 - Strictly isolate tg_instant_setup in Telegram alert loop. If MSS fires, only the Instant alert is sent to the phone.
+  # FIX #29 - Fixed MSS Alert Spam. Deduplication now uses the candle timestamp (mss_out['time']) instead of break_index, preventing index-shift spam.
+  # FIX #30 - Nullify opposing Pre-MSS sweeps when a confirmed MSS exists. If MSS is Bearish, kill pre_mss_buy. If MSS is Bullish, kill pre_mss_sell.
+  # FIX #31 - Decoupled tg_instant_setup from warning_msg. The Instant Setup now bypasses EMA, DXY, and Displacement filters to fire immediately on MSS, unless hard-blocked by News or Weekend.
 """
 import os
 import sys
@@ -1564,12 +1568,14 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                                 "contradicts bullish MSS. Setup invalidated.")
         allow_buy = True
         allow_sell = False
+        pre_mss_sell = None  # FIX #30
     elif mss["type"] == "MSS_BEAR":
         if displacement_bull and last_is_bull:
             return None, None, None, None, pre_mss_buy, pre_mss_sell, ("⚠️ DO NOT SELL: recent massive bullish displacement "
                                 "contradicts bearish MSS. Setup invalidated.")
         allow_buy = False
         allow_sell = True
+        pre_mss_buy = None   # FIX #30
     else:
         return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
 
@@ -1846,7 +1852,14 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
     # HYBRID FEATURE: INSTANT MSS FOR TELEGRAM ONLY
     # ==========================================
     tg_instant_setup = None
-    if mss and not warning_msg:
+    # FIX #31: Hard block only for weekend/news. Bypass EMA/DXY/Displacement warnings.
+    hard_blocked = False
+    if "WEEKEND" in current_killzone(symbol) and symbol.upper() not in CRYPTO_SYMBOLS:
+        hard_blocked = True
+    if is_news_blackout(symbol):
+        hard_blocked = True
+
+    if mss and not hard_blocked:
         atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
         direction = "BUY" if mss["type"] == "MSS_BULL" else "SELL"
         entry = current_px
@@ -1961,14 +1974,19 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                 if "BOS" in mss_out["description"]:
                     alert_key = f"{symbol}_bos_{mss_out['type']}_{mss_out['level']:.4f}"
                 else:
-                    alert_key = f"{symbol}_mss_{mss_out['break_index']}_{mss_out['type']}"
+                    alert_key = f"{symbol}_mss_{mss_out['time']}_{mss_out['type']}"
                 if alert_key not in _sent_alerts:
                     _sent_alerts.add(alert_key)
                     signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
                     send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Open scanner to check for setup._")
 
         # HYBRID ADDITION: tg_instant_setup is added here for Telegram ONLY
-        for setup in [buy_setup, sell_setup, planned_buy, planned_sell, tg_instant_setup]:
+        if tg_instant_setup:
+            tg_setups = [tg_instant_setup]
+        else:
+            tg_setups = [buy_setup, sell_setup, planned_buy, planned_sell]
+
+        for setup in tg_setups:
             if setup:
                 if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
                     logger.warning(f"Skipping setup alert for {symbol} - Invalid entry price {setup['entry']}")
