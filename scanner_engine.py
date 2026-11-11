@@ -1,25 +1,22 @@
 """
 Live Chart Scanner — OANDA with yfinance fallback
 
-REVISION 5.3 (Visual DXY + Pure Momentum):
+REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # USER CUSTOM 1 — Hardcoded OANDA API Key.
   # USER CUSTOM 2 — MIN_RR set to 2.0 (strict 1:2 R:R).
   # USER CUSTOM 3 — Weekend check added to killzone logic.
   # USER CUSTOM 4 — Telegram Alert Integration.
-  # USER CUSTOM 5 — INSTANT MSS + PULLBACK Fallback Telegram Alerts.
-  # USER CUSTOM 6 — Removed PRE-MSS alerts.
+  # USER CUSTOM 5 — Telegram now alerts on ALL planned setups.
+  # USER CUSTOM 6 — Added PRE-MSS SWEEP alerts (Guarded by EMA & Chop filters).
   # USER CUSTOM 7 — Added Biquote News Blackout filter.
-  # USER CUSTOM 8 - Added BOS Continuation logic.
-  # USER CUSTOM 9 - ADDED H1 Trend Check.
-  # USER CUSTOM 10 - REMOVED DXY Correlation Filter (Now purely visual on UI).
-  # USER CUSTOM 11 - Added Pre-Market Game Plan generator.
-  # USER CUSTOM 12 - Added Sequence Enforcer and Session Sweep filters.
-  # USER CUSTOM 13 - Added Unicorn Setup (OB+FVG Overlap).
-  # USER CUSTOM 14 - Added Rejection Wick filter.
-  # USER CUSTOM 15 - TP targets prioritize Liquidity Pools and PDH/PDL.
-  # USER CUSTOM 16 - INSTANT Entry on MSS close. Bypasses checklist score & H4 Bias. 
-  # USER CUSTOM 17 - REMOVED 200 EMA Filter completely. 
-  # USER CUSTOM 18 - Changed SMT Divergence correlation from EURUSD to XAGUSD.
+  # USER CUSTOM 8 - Added BOS Continuation logic (Trend Riding).
+  # USER CUSTOM 9 - Added H1 Trend Check & Chop Filter to eliminate false signals.
+  # USER CUSTOM 10 - Added DXY Correlation Filter for XAUUSD (Guards MSS and Pre-MSS).
+  # USER CUSTOM 11 - Added Pre-Market Game Plan generator (CLI flag --plan).
+  # USER CUSTOM 12 - Added Sequence Enforcer and Session Sweep filters to Checklist.
+  # USER CUSTOM 13 - Added Unicorn Setup (OB+FVG Overlap) & Daily Open Alignment.
+  # USER CUSTOM 14 - Added Rejection Wick filter & Daily Draw on Liquidity (TP2).
+  # USER CUSTOM 15 - HYBRID FEATURE: Telegram receives Instant MSS. Website keeps Pullback logic.
   # FIX #18 - Hard Weekend Blocker & Telegram Alert Sanity Checks.
 """
 import os
@@ -156,7 +153,7 @@ INSTRUMENT_MAP = {
     "XAUUSD": "XAU_USD", "EURUSD": "EUR_USD", "GBPUSD": "GBP_USD",
     "USDJPY": "USD_JPY", "AUDUSD": "AUD_USD", "BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD",
     "NAS100": "NAS100_USD", "US100": "NAS100_USD", "US30": "US30_USD", "JPN225": "JP225_USD",
-    "XAGUSD": "XAG_USD", "DXY": "USD_INDEX"
+    "DXY": "USD_INDEX"
 }
 GRANULARITY_MAP = {"15m": "M15", "1h": "H1", "4h": "H4", "1d": "D"}
 
@@ -164,7 +161,7 @@ YF_FALLBACK = {
     "XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X", "AUDUSD": "AUDUSD=X", "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
     "NAS100": "NQ=F", "US100": "NQ=F", "US30": "YM=F", "JPN225": "^N225",
-    "XAGUSD": "SI=F", "DXY": "DX-Y.NYB"
+    "DXY": "DX-Y.NYB"
 }
 YF_PERIOD = {"15m": "60d", "1h": "180d", "4h": "730d", "1d": "5y"}
 
@@ -1123,6 +1120,17 @@ def premium_discount(df: pd.DataFrame, structure: Dict[str, Any],
             "position": "PREMIUM" if px > mid else "DISCOUNT",
             "current_price": px}
 
+def get_dxy_trend() -> str:
+    try:
+        dxy_df, _ = fetch_data_cached("DXY", "1h", ttl=300)
+        if dxy_df is not None and len(dxy_df) >= 50:
+            dxy_df = find_swings(dxy_df, "1h")
+            dxy_struct = detect_structure(dxy_df)
+            return dxy_struct["trend"]
+    except Exception as e:
+        logger.warning(f"Failed to fetch DXY trend: {e}")
+    return "RANGING"
+
 def get_bias(symbol: str) -> Dict[str, Any]:
     cached = _cache_get(_bias_cache, symbol, 300)
     if cached is not None:
@@ -1206,55 +1214,24 @@ def get_bias(symbol: str) -> Dict[str, Any]:
     _cache_set(_bias_cache, symbol, result)
     return result
 
-def get_dxy_trend() -> str:
-    try:
-        dxy_df, _ = fetch_data_cached("DXY", "1h", ttl=300)
-        if dxy_df is not None and len(dxy_df) >= 50:
-            dxy_df = find_swings(dxy_df, "1h")
-            dxy_struct = detect_structure(dxy_df)
-            return dxy_struct["trend"]
-    except Exception as e:
-        logger.warning(f"Failed to fetch DXY trend: {e}")
-    return "RANGING"
+def pick_tp_swing(structure: Dict[str, Any], entry: float, direction: str) -> Tuple[Optional[float], Optional[float]]:
+    highs = sorted([h["price"] for h in structure.get("swing_highs", []) if h["price"] > 0])
+    lows = sorted([l["price"] for l in structure.get("swing_lows", []) if l["price"] > 0])
 
-def pick_tp_liquidity(pools: List[dict], structure: Dict[str, Any], entry: float, direction: str, pdh: Optional[float], pdl: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
-    """Prioritizes Liquidity Pools (BSL/SSL) and PDH/PDL for Take Profits."""
-    targets = []
-    
     if direction == "BUY":
-        if pdh and pdh > entry:
-            targets.append({"price": pdh, "label": "PDH"})
-        for p in pools:
-            if p["type"] == "BSL" and p["price"] > entry:
-                targets.append({"price": p["price"], "label": "BSL Pool"})
-        for h in structure.get("swing_highs", []):
-            if h["price"] > entry:
-                targets.append({"price": h["price"], "label": "Swing High"})
-        targets.sort(key=lambda x: x["price"])
+        targets = [p for p in highs if p > entry]
+        if targets:
+            tp1 = targets[0]
+            tp2 = targets[1] if len(targets) >= 2 else entry + (tp1 - entry) * 1.5
+            return tp1, tp2
+        return None, None
     else:
-        if pdl and pdl < entry:
-            targets.append({"price": pdl, "label": "PDL"})
-        for p in pools:
-            if p["type"] == "SSL" and p["price"] < entry:
-                targets.append({"price": p["price"], "label": "SSL Pool"})
-        for l in structure.get("swing_lows", []):
-            if l["price"] < entry:
-                targets.append({"price": l["price"], "label": "Swing Low"})
-        targets.sort(key=lambda x: x["price"], reverse=True)
-
-    # Deduplicate targets that are almost identical
-    deduped = []
-    for t in targets:
-        if not deduped or abs(deduped[-1]["price"] - t["price"]) > (entry * 0.0005):
-            deduped.append(t)
-
-    if len(deduped) >= 2:
-        return deduped[0]["price"], deduped[1]["price"]
-    elif len(deduped) == 1:
-        tp1 = deduped[0]["price"]
-        tp2 = tp1 + (tp1 - entry) * 0.5 if direction == "BUY" else tp1 - (entry - tp1) * 0.5
-        return tp1, tp2
-    return None, None
+        targets = sorted([p for p in lows if p < entry], reverse=True)
+        if targets:
+            tp1 = targets[0]
+            tp2 = targets[1] if len(targets) >= 2 else entry - (entry - tp1) * 1.5
+            return tp1, tp2
+        return None, None
 
 SCORE_WEIGHTS_EXACT = {
     "MSS Confirmed": 3,
@@ -1410,10 +1387,10 @@ def detect_smt_divergence(symbol: str, timeframe: str, structure: Dict[str, Any]
     if symbol.upper() != "XAUUSD":
         return "N/A - Only for XAUUSD"
 
-    corr_symbol = "XAGUSD"
+    corr_symbol = "EURUSD"
     corr_df, _ = fetch_data_cached(corr_symbol, timeframe, ttl=300)
     if corr_df is None or len(corr_df) < 50:
-        return "NO DATA (XAGUSD)"
+        return "NO DATA (EURUSD)"
 
     corr_df = find_swings(corr_df, timeframe)
     corr_structure = detect_structure(corr_df)
@@ -1427,9 +1404,9 @@ def detect_smt_divergence(symbol: str, timeframe: str, structure: Dict[str, Any]
         return "INSUFFICIENT SWINGS"
 
     if sh[-1]["price"] > sh[-2]["price"] and corr_sh[-1]["price"] < corr_sh[-2]["price"]:
-        return "BEARISH SMT (XAUUSD HH, XAGUSD LH)"
+        return "BEARISH SMT (XAUUSD HH, EURUSD LH)"
     if sl[-1]["price"] < sl[-2]["price"] and corr_sl[-1]["price"] > corr_sl[-2]["price"]:
-        return "BULLISH SMT (XAUUSD LL, XAGUSD HL)"
+        return "BULLISH SMT (XAUUSD LL, EURUSD HL)"
     return "NO DIVERGENCE DETECTED"
 
 def compute_ote_levels(structure: Dict[str, Any]) -> Optional[dict]:
@@ -1504,8 +1481,57 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     if recent_range < (atr * 2.5):
         return None, None, None, None, None, None, "⚠️ BLOCKED: Market is ranging (Low Volatility)."
 
+    if use_ema_filter:
+        ema_200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
+        
+        if mss:
+            if mss["type"] == "MSS_BEAR" and current_price > ema_200:
+                warning_msg = "⚠️ BLOCKED SELL: Price is above 200 EMA (Bullish Momentum)"
+                return None, None, None, None, None, None, warning_msg
+                
+            if mss["type"] == "MSS_BULL" and current_price < ema_200:
+                warning_msg = "⚠️ BLOCKED BUY: Price is below 200 EMA (Bearish Momentum)"
+                return None, None, None, None, None, None, warning_msg
+        else:
+            if sweep and sweep.get("latest"):
+                latest = sweep["latest"]
+                if latest["type"] == "BSL_SWEEP" and current_price > ema_200:
+                    warning_msg = "⚠️ BLOCKED PRE-MSS SELL: Price is above 200 EMA"
+                    return None, None, None, None, None, None, warning_msg
+                if latest["type"] == "SSL_SWEEP" and current_price < ema_200:
+                    warning_msg = "⚠️ BLOCKED PRE-MSS BUY: Price is below 200 EMA"
+                    return None, None, None, None, None, None, warning_msg
+
+    dxy_trend = get_dxy_trend() if symbol.upper() == "XAUUSD" else "RANGING"
+    
+    if dxy_trend == "BULLISH":
+        if mss and mss["type"] == "MSS_BULL":
+            return None, None, None, None, None, None, "⚠️ BLOCKED BUY: DXY is strongly BULLISH."
+        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "SSL_SWEEP":
+            return None, None, None, None, None, None, "⚠️ BLOCKED PRE-MSS BUY: DXY is strongly BULLISH."
+            
+    if dxy_trend == "BEARISH":
+        if mss and mss["type"] == "MSS_BEAR":
+            return None, None, None, None, None, None, "⚠️ BLOCKED SELL: DXY is strongly BEARISH."
+        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "BSL_SWEEP":
+            return None, None, None, None, None, None, "⚠️ BLOCKED PRE-MSS SELL: DXY is strongly BEARISH."
+
+    pre_mss_buy, pre_mss_sell = None, None
+    if sweep and sweep.get("latest"):
+        latest = sweep["latest"]
+        if latest["type"] == "SSL_SWEEP" and bias.get("allow_buy"):
+            sl = latest["swept_price"] - (atr * 0.3)
+            risk = current_price - sl
+            if risk > 0:
+                pre_mss_buy = {"direction": "BUY", "entry": current_price, "sl": sl, "tp1": current_price + risk * 2.0, "tp2": current_price + risk * 3.0, "rr": 2.0, "zone_type": "PRE-MSS SWEEP", "confidence": "EARLY ENTRY", "zone_quality": 0, "checklist": [], "score": 0, "reasons": [], "sl_basis": "sweep wick", "tp_basis": "fixed 1:2"}
+        elif latest["type"] == "BSL_SWEEP" and bias.get("allow_sell"):
+            sl = latest["swept_price"] + (atr * 0.3)
+            risk = sl - current_price
+            if risk > 0:
+                pre_mss_sell = {"direction": "SELL", "entry": current_price, "sl": sl, "tp1": current_price - risk * 2.0, "tp2": current_price - risk * 3.0, "rr": 2.0, "zone_type": "PRE-MSS SWEEP", "confidence": "EARLY ENTRY", "zone_quality": 0, "checklist": [], "score": 0, "reasons": [], "sl_basis": "sweep wick", "tp_basis": "fixed 1:2"}
+
     if not mss:
-        return None, None, None, None, None, None, warning_msg
+        return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
 
     recent = df.tail(3)
     displacement_bear = False
@@ -1525,21 +1551,21 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
 
     if mss["type"] == "MSS_BULL":
         if displacement_bear and last_is_bear:
-            return None, None, None, None, None, None, ("⚠️ DO NOT BUY: recent massive bearish displacement "
+            return None, None, None, None, pre_mss_buy, pre_mss_sell, ("⚠️ DO NOT BUY: recent massive bearish displacement "
                                 "contradicts bullish MSS. Setup invalidated.")
         allow_buy = True
         allow_sell = False
     elif mss["type"] == "MSS_BEAR":
         if displacement_bull and last_is_bull:
-            return None, None, None, None, None, None, ("⚠️ DO NOT SELL: recent massive bullish displacement "
+            return None, None, None, None, pre_mss_buy, pre_mss_sell, ("⚠️ DO NOT SELL: recent massive bullish displacement "
                                 "contradicts bearish MSS. Setup invalidated.")
         allow_buy = False
         allow_sell = True
     else:
-        return None, None, None, None, None, None, warning_msg
+        return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
 
     def build_setup(direction: str, zone: dict, entry: float, sl: float,
-                    tp1: float, tp2: float, force_instant: bool = False) -> Optional[dict]:
+                    tp1: float, tp2: float) -> Optional[dict]:
         risk = abs(entry - sl)
         if risk <= 0:
             return None
@@ -1548,7 +1574,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
         if rr < MIN_RR:
             return None
 
-        if bias_tier == "NEUTRAL" and not force_instant:
+        if bias_tier == "NEUTRAL":
             mss_ok = mss and (
                 (mss["type"] == "MSS_BULL" and direction == "BUY") or
                 (mss["type"] == "MSS_BEAR" and direction == "SELL")
@@ -1573,13 +1599,11 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             confidence = "MEDIUM"
         elif pts >= 4:
             confidence = "LOW"
-        elif force_instant:
-            confidence = "INSTANT"
         else:
             return None
 
         htf_bias_check = next((c for c in checklist if c["label"] == "HTF Bias"), None)
-        if htf_bias_check and not htf_bias_check["pass"] and not force_instant:
+        if htf_bias_check and not htf_bias_check["pass"]:
             if confidence == "HIGH":
                 confidence = "MEDIUM"
             elif confidence == "MEDIUM":
@@ -1599,7 +1623,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             "zone_type": zone["label"], "confidence": confidence,
             "zone_quality": safe_float(zone.get("quality", 0)),
             "checklist": checklist, "score": pts, "reasons": reasons,
-            "sl_basis": "zone edge", "tp_basis": "liquidity draw",
+            "sl_basis": "zone edge", "tp_basis": "next swing",
         }
 
     buy_setup = None
@@ -1607,41 +1631,6 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     planned_buy = None
     planned_sell = None
 
-    # ==========================================
-    # INSTANT MSS ENTRY (FORCED - IGNORES H4 BIAS)
-    # ==========================================
-    if mss:
-        direction = "BUY" if mss["type"] == "MSS_BULL" else "SELL"
-        
-        # REMOVED THE allow_buy / allow_sell CHECK HERE
-        # It will now fire instantly in BOTH directions.
-        
-        entry = current_price
-        
-        if direction == "BUY":
-            sl = mss["level"] - (atr * 0.3)
-            risk = entry - sl
-        else:
-            sl = mss["level"] + (atr * 0.3)
-            risk = sl - entry
-
-        if risk > 0 and risk <= max_risk:
-            tp1 = entry + (risk * 2.0) if direction == "BUY" else entry - (risk * 2.0)
-            
-            pdh, pdl = get_previous_day_hl(symbol)
-            liq_tp1, _ = pick_tp_liquidity(pools, structure, entry, direction, pdh, pdl)
-            tp2 = liq_tp1 if liq_tp1 is not None else (entry + (risk * 3.0) if direction == "BUY" else entry - (risk * 3.0))
-
-            virtual_zone = {"label": f"INSTANT {mss['type']}", "quality": 2.0, "touches": 0, "top": max(entry, sl), "bottom": min(entry, sl)}
-            
-            instant_setup = build_setup(direction, virtual_zone, entry, sl, tp1, tp2, force_instant=True)
-            if instant_setup:
-                if direction == "BUY":
-                    buy_setup = instant_setup
-                else:
-                    sell_setup = instant_setup
-
-    # Calculate Pullback plans for the UI
     if allow_buy:
         bull_zones = sorted(
             [o for o in obs if o["type"] == "OB_BULL"] +
@@ -1660,21 +1649,21 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                 risk = min_risk
             if risk > max_risk:
                 continue
-            
-            pdh, pdl = get_previous_day_hl(symbol)
-            tp1, tp2 = pick_tp_liquidity(pools, structure, entry, "BUY", pdh, pdl)
-            
+            tp1, tp2 = pick_tp_swing(structure, entry, "BUY")
             if tp1 is None:
                 continue
+            
+            pdh, pdl = get_previous_day_hl(symbol)
+            if pdh and pdh > tp1 and pdh > tp2: tp2 = pdh
 
             setup = build_setup("BUY", zone, entry, sl, tp1, tp2)
             if setup:
                 if planned_buy is None:
                     planned_buy = setup
-                if buy_setup is None:
-                    if ((zone_bottom - tolerance) <= current_price <= (entry + tolerance)):
-                        buy_setup = setup
-                        break
+                
+                if ((zone_bottom - tolerance) <= current_price <= (entry + tolerance)):
+                    buy_setup = setup
+                    break
 
     if allow_sell:
         bear_zones = sorted(
@@ -1694,23 +1683,23 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                 risk = min_risk
             if risk > max_risk:
                 continue
-            
-            pdh, pdl = get_previous_day_hl(symbol)
-            tp1, tp2 = pick_tp_liquidity(pools, structure, entry, "SELL", pdh, pdl)
-
+            tp1, tp2 = pick_tp_swing(structure, entry, "SELL")
             if tp1 is None:
                 continue
+            
+            pdh, pdl = get_previous_day_hl(symbol)
+            if pdl and pdl < tp1 and pdl < tp2: tp2 = pdl
 
             setup = build_setup("SELL", zone, entry, sl, tp1, tp2)
             if setup:
                 if planned_sell is None:
                     planned_sell = setup
-                if sell_setup is None:
-                    if ((entry - tolerance) <= current_price <= (zone_top + tolerance)):
-                        sell_setup = setup
-                        break
+                
+                if ((entry - tolerance) <= current_price <= (zone_top + tolerance)):
+                    sell_setup = setup
+                    break
 
-    return buy_setup, sell_setup, planned_buy, planned_sell, None, None, warning_msg
+    return buy_setup, sell_setup, planned_buy, planned_sell, pre_mss_buy, pre_mss_sell, warning_msg
 
 def compute_correlations(symbols: List[str], timeframe: str = '1h', lookback: int = 200) -> Dict[str, Any]:
     series: Dict[str, np.ndarray] = {}
@@ -1813,7 +1802,6 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
     pdh, pdl = get_previous_day_hl(symbol)
     sessions = get_session_ranges(df, symbol, timeframe)
     daily_open = get_daily_open(symbol)
-    dxy_trend = get_dxy_trend()
 
     killzone_ok = in_killzone(symbol)
     bias = get_bias(symbol)
@@ -1834,6 +1822,33 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
         symbol=symbol, bias=bias, killzone_ok=killzone_ok, sweep=sweep, use_ema_filter=use_ema_filter, sessions=sessions, daily_open=daily_open
     )
     killzone = current_killzone(symbol)
+
+    # ==========================================
+    # HYBRID FEATURE: INSTANT MSS FOR TELEGRAM ONLY
+    # ==========================================
+    tg_instant_setup = None
+    if mss and not warning_msg:
+        atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
+        direction = "BUY" if mss["type"] == "MSS_BULL" else "SELL"
+        entry = current_px
+        
+        if direction == "BUY":
+            sl = mss["level"] - (atr * 0.3)
+            risk = entry - sl
+        else:
+            sl = mss["level"] + (atr * 0.3)
+            risk = sl - entry
+
+        if risk > 0:
+            tp1 = entry + (risk * 2.0) if direction == "BUY" else entry - (risk * 2.0)
+            tp2 = entry + (risk * 3.0) if direction == "BUY" else entry - (risk * 3.0)
+            
+            tg_instant_setup = {
+                "direction": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": 2.0,
+                "zone_type": f"INSTANT {mss['type']}", "confidence": "INSTANT",
+                "checklist": [], "score": 10, "reasons": [], "sl_basis": "MSS level", "tp_basis": "fixed 1:3"
+            }
+    # ==========================================
 
     candles = _build_candles(df, symbol, timeframe)
     sh_markers = _build_swing_markers(df, structure["swing_highs"])
@@ -1902,6 +1917,17 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                 _sent_alerts.add(alert_key)
                 send_telegram_alert(f"🛑 *{symbol} - MACRO WARNING* 🛑\n\n{warning_msg}\n\n_Scanner is locked. Do not trade._")
 
+        for setup in [pre_mss_buy, pre_mss_sell]:
+            if setup:
+                if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
+                    logger.warning(f"Skipping alert for {symbol} - Invalid entry price {setup['entry']}")
+                    continue
+                alert_key = f"{symbol}_pre_mss_{setup['direction']}_{setup['entry']:.2f}"
+                if alert_key not in _sent_alerts:
+                    _sent_alerts.add(alert_key)
+                    emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
+                    send_telegram_alert(f"⚡ *{symbol} - {emoji} PRE-MSS SWEEP* ⚡\n\nEntry: {fmt_price(setup['entry'])}\nSL: {fmt_price(setup['sl'])}\nTP1: {fmt_price(setup['tp1'])}\nR:R: 1 : 2.00\n\n⚠️ _EARLY ENTRY. High Risk. Wait for MSS if unsure._\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})")
+
         if mss_out:
             if symbol.upper() == "XAUUSD" and mss_out["level"] < 1000:
                 logger.warning(f"Skipping MSS alert for {symbol} - Invalid level {mss_out['level']}")
@@ -1912,7 +1938,8 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                     signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
                     send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Open scanner to check for setup._")
 
-        for setup in [buy_setup, sell_setup, planned_buy, planned_sell]:
+        # HYBRID ADDITION: tg_instant_setup is added here for Telegram ONLY
+        for setup in [buy_setup, sell_setup, planned_buy, planned_sell, tg_instant_setup]:
             if setup:
                 if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
                     logger.warning(f"Skipping setup alert for {symbol} - Invalid entry price {setup['entry']}")
@@ -1948,7 +1975,6 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
         "live_price_is_tick": bool(is_tick),
         "structure": structure,
         "bias": bias,
-        "dxy_trend": dxy_trend,
         "mss": mss_out,
         "sweep": sweep_out,
         "pdh": pdh, "pdl": pdl,
