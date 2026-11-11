@@ -34,7 +34,9 @@ REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # FIX #32 - Pre-MSS Sweeps now also bypass H4 bias. If a sweep happens, it fires the setup alert immediately, irrespective of D1/H4 trends.
   # FIX #33 - Suppress Pre-MSS Sweep Telegram alerts if an active MSS setup exists in the same direction.
   # FIX #34 - Fixed tg_instant_setup deduplication bug. Now uses candle timestamp (mss_out['time']) instead of price level, preventing missed setups on repeated price levels.
-  # FIX #35 - Force tg_instant_setup generation on MSS. If risk <= 0 (price moved too fast), fallback to ATR risk. Removed basic MSS alert to prevent "Open scanner" spam.
+  # FIX #35 - Force tg_instant_setup generation on MSS. If risk <= 0 (price moved too fast), fallback to ATR risk.
+  # FIX #36 - Moved Pre-MSS cleanup (FIX #30) to the top of generate_scenarios() so that early returns (like the 200 EMA filter) do not bypass the nullification logic.
+  # FIX #37 - Restored the basic MSS structural alert to Telegram alongside the Instant Setup.
 """
 import os
 import sys
@@ -1498,45 +1500,10 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     if recent_range < (atr * 2.5):
         return None, None, None, None, None, None, "⚠️ BLOCKED: Market is ranging (Low Volatility)."
 
-    if use_ema_filter:
-        ema_200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
-        
-        if mss:
-            if mss["type"] == "MSS_BEAR" and current_price > ema_200:
-                warning_msg = "⚠️ BLOCKED SELL: Price is above 200 EMA (Bullish Momentum)"
-                return None, None, None, None, None, None, warning_msg
-                
-            if mss["type"] == "MSS_BULL" and current_price < ema_200:
-                warning_msg = "⚠️ BLOCKED BUY: Price is below 200 EMA (Bearish Momentum)"
-                return None, None, None, None, None, None, warning_msg
-        else:
-            if sweep and sweep.get("latest"):
-                latest = sweep["latest"]
-                if latest["type"] == "BSL_SWEEP" and current_price > ema_200:
-                    warning_msg = "⚠️ BLOCKED PRE-MSS SELL: Price is above 200 EMA"
-                    return None, None, None, None, None, None, warning_msg
-                if latest["type"] == "SSL_SWEEP" and current_price < ema_200:
-                    warning_msg = "⚠️ BLOCKED PRE-MSS BUY: Price is below 200 EMA"
-                    return None, None, None, None, None, None, warning_msg
-
-    dxy_trend = get_dxy_trend() if symbol.upper() == "XAUUSD" else "RANGING"
-    
-    if dxy_trend == "BULLISH":
-        if mss and mss["type"] == "MSS_BULL":
-            return None, None, None, None, None, None, "⚠️ BLOCKED BUY: DXY is strongly BULLISH."
-        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "SSL_SWEEP":
-            return None, None, None, None, None, None, "⚠️ BLOCKED PRE-MSS BUY: DXY is strongly BULLISH."
-            
-    if dxy_trend == "BEARISH":
-        if mss and mss["type"] == "MSS_BEAR":
-            return None, None, None, None, None, None, "⚠️ BLOCKED SELL: DXY is strongly BEARISH."
-        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "BSL_SWEEP":
-            return None, None, None, None, None, None, "⚠️ BLOCKED PRE-MSS SELL: DXY is strongly BEARISH."
-
+    # FIX #36: Generate Pre-MSS setups FIRST, and nullify opposing directions immediately.
     pre_mss_buy, pre_mss_sell = None, None
     if sweep and sweep.get("latest"):
         latest = sweep["latest"]
-        # FIX #32: Removed bias gates for pre-mss sweep generation
         if latest["type"] == "SSL_SWEEP":
             sl = latest["swept_price"] - (atr * 0.3)
             risk = current_price - sl
@@ -1547,6 +1514,48 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
             risk = sl - current_price
             if risk > 0:
                 pre_mss_sell = {"direction": "SELL", "entry": current_price, "sl": sl, "tp1": current_price - risk * 2.0, "tp2": current_price - risk * 3.0, "rr": 2.0, "zone_type": "PRE-MSS SWEEP", "confidence": "EARLY ENTRY", "zone_quality": 0, "checklist": [], "score": 0, "reasons": [], "sl_basis": "sweep wick", "tp_basis": "fixed 1:2"}
+
+    if mss:
+        if mss["type"] == "MSS_BULL":
+            pre_mss_sell = None  # FIX #30 & #36
+        elif mss["type"] == "MSS_BEAR":
+            pre_mss_buy = None   # FIX #30 & #36
+
+    # Now apply filters
+    if use_ema_filter:
+        ema_200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
+        
+        if mss:
+            if mss["type"] == "MSS_BEAR" and current_price > ema_200:
+                warning_msg = "⚠️ BLOCKED SELL: Price is above 200 EMA (Bullish Momentum)"
+                return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
+                
+            if mss["type"] == "MSS_BULL" and current_price < ema_200:
+                warning_msg = "⚠️ BLOCKED BUY: Price is below 200 EMA (Bearish Momentum)"
+                return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
+        else:
+            if sweep and sweep.get("latest"):
+                latest = sweep["latest"]
+                if latest["type"] == "BSL_SWEEP" and current_price > ema_200:
+                    warning_msg = "⚠️ BLOCKED PRE-MSS SELL: Price is above 200 EMA"
+                    return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
+                if latest["type"] == "SSL_SWEEP" and current_price < ema_200:
+                    warning_msg = "⚠️ BLOCKED PRE-MSS BUY: Price is below 200 EMA"
+                    return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
+
+    dxy_trend = get_dxy_trend() if symbol.upper() == "XAUUSD" else "RANGING"
+    
+    if dxy_trend == "BULLISH":
+        if mss and mss["type"] == "MSS_BULL":
+            return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED BUY: DXY is strongly BULLISH."
+        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "SSL_SWEEP":
+            return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED PRE-MSS BUY: DXY is strongly BULLISH."
+            
+    if dxy_trend == "BEARISH":
+        if mss and mss["type"] == "MSS_BEAR":
+            return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED SELL: DXY is strongly BEARISH."
+        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "BSL_SWEEP":
+            return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED PRE-MSS SELL: DXY is strongly BEARISH."
 
     if not mss:
         return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
@@ -1573,14 +1582,12 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                                 "contradicts bullish MSS. Setup invalidated.")
         allow_buy = True
         allow_sell = False
-        pre_mss_sell = None  # FIX #30
     elif mss["type"] == "MSS_BEAR":
         if displacement_bull and last_is_bull:
             return None, None, None, None, pre_mss_buy, pre_mss_sell, ("⚠️ DO NOT SELL: recent massive bullish displacement "
                                 "contradicts bearish MSS. Setup invalidated.")
         allow_buy = False
         allow_sell = True
-        pre_mss_buy = None   # FIX #30
     else:
         return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
 
@@ -1981,7 +1988,19 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                     emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
                     send_telegram_alert(f"⚡ *{symbol} - {emoji} PRE-MSS SWEEP* ⚡\n\nEntry: {fmt_price(setup['entry'])}\nSL: {fmt_price(setup['sl'])}\nTP1: {fmt_price(setup['tp1'])}\nR:R: 1 : 2.00\n\n⚠️ _EARLY ENTRY. High Risk. Wait for MSS if unsure._\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})")
 
-        # FIX #35: Removed basic MSS alert to prevent "Open scanner" spam. We only want setup alerts now.
+        # FIX #37: Restored the MSS alert block for structural confirmation.
+        if mss_out and not warning_msg:
+            if symbol.upper() == "XAUUSD" and mss_out["level"] < 1000:
+                logger.warning(f"Skipping MSS alert for {symbol} - Invalid level {mss_out['level']}")
+            else:
+                if "BOS" in mss_out["description"]:
+                    alert_key = f"{symbol}_bos_{mss_out['type']}_{mss_out['level']:.4f}"
+                else:
+                    alert_key = f"{symbol}_mss_{mss_out['time']}_{mss_out['type']}"
+                if alert_key not in _sent_alerts:
+                    _sent_alerts.add(alert_key)
+                    signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
+                    send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Setup alert below..._")
 
         # HYBRID ADDITION: tg_instant_setup is added here for Telegram ONLY
         if tg_instant_setup:
