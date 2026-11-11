@@ -18,6 +18,15 @@ REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # USER CUSTOM 14 - Added Rejection Wick filter & Daily Draw on Liquidity (TP2).
   # USER CUSTOM 15 - HYBRID FEATURE: Telegram receives Instant MSS. Website keeps Pullback logic.
   # FIX #18 - Hard Weekend Blocker & Telegram Alert Sanity Checks.
+  # FIX #19 - Rule 5 hard gate: tg_instant_setup now respects bias.allow_buy/allow_sell.
+  # FIX #20 - Rule 5 hard filter: LOW confidence or CONFLICT tier setups never ship.
+  # FIX #21 - MSS Telegram alert suppressed when warning_msg is set.
+  # FIX #22 - BOS continuation alert dedup by level (stops 30s alert spam from shifting break_index).
+  # FIX #23 - Added XAGUSD (Silver) to SMT Divergence instead of EURUSD.
+  # FIX #24 - tg_instant_setup bypasses bias gate (fires immediately on MSS), TP2 targets liquidity, adds counter-trend warning.
+  # FIX #25 - UI Planned boxes (conservative/aggressive) now render immediately on MSS irrespective of H4 bias.
+  # FIX #26 - Fixed tg_instant_setup deduplication (uses static MSS level/type instead of shifting live price to stop 30s alert spam).
+  # FIX #27 - Fixed UI box generation. The zone loop now explicitly triggers on MSS so boxes render even if bias.allow_buy/allow_sell is False.
 """
 import os
 import sys
@@ -150,7 +159,7 @@ _CACHE_MAX = 256
 _ANALYZE_TTL = 30
 
 INSTRUMENT_MAP = {
-    "XAUUSD": "XAU_USD", "EURUSD": "EUR_USD", "GBPUSD": "GBP_USD",
+    "XAUUSD": "XAU_USD", "XAGUSD": "XAG_USD", "EURUSD": "EUR_USD", "GBPUSD": "GBP_USD",
     "USDJPY": "USD_JPY", "AUDUSD": "AUD_USD", "BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD",
     "NAS100": "NAS100_USD", "US100": "NAS100_USD", "US30": "US30_USD", "JPN225": "JP225_USD",
     "DXY": "USD_INDEX"
@@ -158,7 +167,7 @@ INSTRUMENT_MAP = {
 GRANULARITY_MAP = {"15m": "M15", "1h": "H1", "4h": "H4", "1d": "D"}
 
 YF_FALLBACK = {
-    "XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
+    "XAUUSD": "GC=F", "XAGUSD": "SI=F", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X", "AUDUSD": "AUDUSD=X", "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
     "NAS100": "NQ=F", "US100": "NQ=F", "US30": "YM=F", "JPN225": "^N225",
     "DXY": "DX-Y.NYB"
@@ -1387,10 +1396,10 @@ def detect_smt_divergence(symbol: str, timeframe: str, structure: Dict[str, Any]
     if symbol.upper() != "XAUUSD":
         return "N/A - Only for XAUUSD"
 
-    corr_symbol = "EURUSD"
+    corr_symbol = "XAGUSD"
     corr_df, _ = fetch_data_cached(corr_symbol, timeframe, ttl=300)
     if corr_df is None or len(corr_df) < 50:
-        return "NO DATA (EURUSD)"
+        return "NO DATA (XAGUSD)"
 
     corr_df = find_swings(corr_df, timeframe)
     corr_structure = detect_structure(corr_df)
@@ -1404,9 +1413,9 @@ def detect_smt_divergence(symbol: str, timeframe: str, structure: Dict[str, Any]
         return "INSUFFICIENT SWINGS"
 
     if sh[-1]["price"] > sh[-2]["price"] and corr_sh[-1]["price"] < corr_sh[-2]["price"]:
-        return "BEARISH SMT (XAUUSD HH, EURUSD LH)"
+        return "BEARISH SMT (XAUUSD HH, XAGUSD LH)"
     if sl[-1]["price"] < sl[-2]["price"] and corr_sl[-1]["price"] > corr_sl[-2]["price"]:
-        return "BULLISH SMT (XAUUSD LL, EURUSD HL)"
+        return "BULLISH SMT (XAUUSD LL, XAGUSD HL)"
     return "NO DIVERGENCE DETECTED"
 
 def compute_ote_levels(structure: Dict[str, Any]) -> Optional[dict]:
@@ -1574,12 +1583,13 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
         if rr < MIN_RR:
             return None
 
+        is_mss_driven = bool(mss) and (
+            (mss["type"] == "MSS_BULL" and direction == "BUY") or
+            (mss["type"] == "MSS_BEAR" and direction == "SELL")
+        )
+
         if bias_tier == "NEUTRAL":
-            mss_ok = mss and (
-                (mss["type"] == "MSS_BULL" and direction == "BUY") or
-                (mss["type"] == "MSS_BEAR" and direction == "SELL")
-            )
-            if not mss_ok:
+            if not is_mss_driven:
                 return None
 
         is_unicorn = False
@@ -1600,7 +1610,9 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
         elif pts >= 4:
             confidence = "LOW"
         else:
-            return None
+            if not is_mss_driven:
+                return None
+            confidence = "LOW"
 
         htf_bias_check = next((c for c in checklist if c["label"] == "HTF Bias"), None)
         if htf_bias_check and not htf_bias_check["pass"]:
@@ -1612,8 +1624,15 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
         if bias_tier in ("NEUTRAL", "WEAK") and confidence == "HIGH":
             confidence = "MEDIUM"
 
-        if bias_tier == "CONFLICT":
+        if bias_tier == "CONFLICT" and not is_mss_driven:
             confidence = "LOW"
+
+        if not is_mss_driven:
+            if confidence == "LOW" or bias_tier == "CONFLICT":
+                return None
+        else:
+            if confidence == "LOW":
+                confidence = "MEDIUM"
 
         reasons = [f"{'✅' if c['pass'] else '⚠️'} {c['label']} — {c['detail']}" for c in checklist]
 
@@ -1631,7 +1650,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     planned_buy = None
     planned_sell = None
 
-    if allow_buy:
+    if allow_buy or (mss and mss["type"] == "MSS_BULL"):
         bull_zones = sorted(
             [o for o in obs if o["type"] == "OB_BULL"] +
             [f for f in fvgs if f["type"] == "FVG_BULL"],
@@ -1665,7 +1684,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                     buy_setup = setup
                     break
 
-    if allow_sell:
+    if allow_sell or (mss and mss["type"] == "MSS_BEAR"):
         bear_zones = sorted(
             [o for o in obs if o["type"] == "OB_BEAR"] +
             [f for f in fvgs if f["type"] == "FVG_BEAR"],
@@ -1835,18 +1854,25 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
         if direction == "BUY":
             sl = mss["level"] - (atr * 0.3)
             risk = entry - sl
+            tp1 = entry + (risk * 2.0)
+            
+            bsl_targets = sorted([p["price"] for p in pools if p["type"] == "BSL" and p["price"] > tp1])
+            tp2 = bsl_targets[0] if bsl_targets else entry + (risk * 3.0)
+            tp_basis = "liquidity" if bsl_targets else "fixed 1:3"
         else:
             sl = mss["level"] + (atr * 0.3)
             risk = sl - entry
+            tp1 = entry - (risk * 2.0)
+            
+            ssl_targets = sorted([p["price"] for p in pools if p["type"] == "SSL" and p["price"] < tp1], reverse=True)
+            tp2 = ssl_targets[0] if ssl_targets else entry - (risk * 3.0)
+            tp_basis = "liquidity" if ssl_targets else "fixed 1:3"
 
         if risk > 0:
-            tp1 = entry + (risk * 2.0) if direction == "BUY" else entry - (risk * 2.0)
-            tp2 = entry + (risk * 3.0) if direction == "BUY" else entry - (risk * 3.0)
-            
             tg_instant_setup = {
                 "direction": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "rr": 2.0,
                 "zone_type": f"INSTANT {mss['type']}", "confidence": "INSTANT",
-                "checklist": [], "score": 10, "reasons": [], "sl_basis": "MSS level", "tp_basis": "fixed 1:3"
+                "checklist": [], "score": 10, "reasons": [], "sl_basis": "MSS level", "tp_basis": tp_basis
             }
     # ==========================================
 
@@ -1928,11 +1954,14 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                     emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
                     send_telegram_alert(f"⚡ *{symbol} - {emoji} PRE-MSS SWEEP* ⚡\n\nEntry: {fmt_price(setup['entry'])}\nSL: {fmt_price(setup['sl'])}\nTP1: {fmt_price(setup['tp1'])}\nR:R: 1 : 2.00\n\n⚠️ _EARLY ENTRY. High Risk. Wait for MSS if unsure._\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})")
 
-        if mss_out:
+        if mss_out and not warning_msg:
             if symbol.upper() == "XAUUSD" and mss_out["level"] < 1000:
                 logger.warning(f"Skipping MSS alert for {symbol} - Invalid level {mss_out['level']}")
             else:
-                alert_key = f"{symbol}_mss_{mss_out['break_index']}_{mss_out['type']}"
+                if "BOS" in mss_out["description"]:
+                    alert_key = f"{symbol}_bos_{mss_out['type']}_{mss_out['level']:.4f}"
+                else:
+                    alert_key = f"{symbol}_mss_{mss_out['break_index']}_{mss_out['type']}"
                 if alert_key not in _sent_alerts:
                     _sent_alerts.add(alert_key)
                     signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
@@ -1944,22 +1973,36 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                 if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
                     logger.warning(f"Skipping setup alert for {symbol} - Invalid entry price {setup['entry']}")
                     continue
-                alert_key = f"{symbol}_{setup['direction']}_{setup['entry']:.2f}"
+                
+                if setup.get("confidence") == "INSTANT" and mss:
+                    alert_key = f"{symbol}_instant_{mss['type']}_{mss['level']:.4f}"
+                else:
+                    alert_key = f"{symbol}_{setup['direction']}_{setup['entry']:.2f}"
+                    
                 if alert_key not in _sent_alerts:
                     _sent_alerts.add(alert_key)
                     
-                    status_label = setup["confidence"]
-                    if bias['tier'] == "CONFLICT":
-                        status_label = "CONFLICT (DO NOT TRADE)"
-                    elif status_label == "LOW":
-                        status_label = "WAITING (DO NOT TRADE)"
-                        
+                    is_counter_trend = (setup["direction"] == "BUY" and not bias.get("allow_buy")) or \
+                                       (setup["direction"] == "SELL" and not bias.get("allow_sell"))
+                    
+                    if setup["confidence"] == "INSTANT":
+                        status_label = "⚡ INSTANT MSS"
+                        if is_counter_trend:
+                            status_label += " (⚠️ COUNTER-TREND)"
+                    else:
+                        status_label = setup["confidence"]
+                        if bias['tier'] == "CONFLICT":
+                            status_label = "CONFLICT (DO NOT TRADE)"
+                        elif status_label == "LOW":
+                            status_label = "WAITING (DO NOT TRADE)"
+                            
                     direction_emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
                     setup_msg = (
-                        f"🎯 *{symbol} - {direction_emoji} PLAN* ({status_label})\n\n"
+                        f"🎯 *{symbol} - {direction_emoji} SETUP* ({status_label})\n\n"
                         f"Entry: {fmt_price(setup['entry'])}\n"
                         f"SL: {fmt_price(setup['sl'])}\n"
                         f"TP1: {fmt_price(setup['tp1'])}\n"
+                        f"TP2: {fmt_price(setup['tp2'])} ({setup.get('tp_basis', 'next swing')})\n"
                         f"R:R: 1 : {setup['rr']:.2f}\n\n"
                         f"Zone: {setup['zone_type']}\n"
                         f"Bias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})"
