@@ -31,6 +31,8 @@ REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # FIX #29 - Fixed MSS Alert Spam. Deduplication now uses the candle timestamp (mss_out['time']) instead of break_index, preventing index-shift spam.
   # FIX #30 - Nullify opposing Pre-MSS sweeps when a confirmed MSS exists. If MSS is Bearish, kill pre_mss_buy. If MSS is Bullish, kill pre_mss_sell.
   # FIX #31 - Decoupled tg_instant_setup from warning_msg. The Instant Setup now bypasses EMA, DXY, and Displacement filters to fire immediately on MSS, unless hard-blocked by News or Weekend.
+  # FIX #32 - Pre-MSS Sweeps now also bypass H4 bias. If a sweep happens, it fires the setup alert immediately, irrespective of D1/H4 trends.
+  # FIX #33 - Suppress Pre-MSS Sweep Telegram alerts if an active MSS setup exists in the same direction.
 """
 import os
 import sys
@@ -1532,12 +1534,13 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     pre_mss_buy, pre_mss_sell = None, None
     if sweep and sweep.get("latest"):
         latest = sweep["latest"]
-        if latest["type"] == "SSL_SWEEP" and bias.get("allow_buy"):
+        # FIX #32: Removed bias gates for pre-mss sweep generation
+        if latest["type"] == "SSL_SWEEP":
             sl = latest["swept_price"] - (atr * 0.3)
             risk = current_price - sl
             if risk > 0:
                 pre_mss_buy = {"direction": "BUY", "entry": current_price, "sl": sl, "tp1": current_price + risk * 2.0, "tp2": current_price + risk * 3.0, "rr": 2.0, "zone_type": "PRE-MSS SWEEP", "confidence": "EARLY ENTRY", "zone_quality": 0, "checklist": [], "score": 0, "reasons": [], "sl_basis": "sweep wick", "tp_basis": "fixed 1:2"}
-        elif latest["type"] == "BSL_SWEEP" and bias.get("allow_sell"):
+        elif latest["type"] == "BSL_SWEEP":
             sl = latest["swept_price"] + (atr * 0.3)
             risk = sl - current_price
             if risk > 0:
@@ -1958,6 +1961,10 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
 
         for setup in [pre_mss_buy, pre_mss_sell]:
             if setup:
+                # FIX #33: Suppress Pre-MSS Sweep if an Instant MSS setup exists in the same direction.
+                if tg_instant_setup and setup['direction'] == tg_instant_setup['direction']:
+                    continue
+                    
                 if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
                     logger.warning(f"Skipping alert for {symbol} - Invalid entry price {setup['entry']}")
                     continue
