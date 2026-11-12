@@ -39,6 +39,7 @@ REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # FIX #37 - Restored the basic MSS structural alert to Telegram alongside the Instant Setup.
   # FIX #38 - Removed Pre-MSS Sweep Telegram alerts completely. Telegram ONLY receives the confirmed MSS Instant Setup. UI continues to show all boxes.
   # FIX #39 - Added Weak MSS Rejection Filter. If the MSS candle has a massive wick (>40%), the bot sends a FAKEOUT WARNING instead of a setup, protecting against Judas Swings.
+  # FIX #40 - Combined MSS alert and Instant Setup into a single atomic block. If the MSS fires, the Setup MUST send immediately below it. No more missing setups due to separate deduplication loops.
 """
 import os
 import sys
@@ -1974,6 +1975,7 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                 _sent_alerts.add(alert_key)
                 send_telegram_alert(f"🛑 *{symbol} - MACRO WARNING* 🛑\n\n{warning_msg}\n\n_Scanner is locked. Do not trade._")
 
+        # FIX #40: Combined MSS Alert & Setup
         if mss_out and not warning_msg:
             if symbol.upper() == "XAUUSD" and mss_out["level"] < 1000:
                 logger.warning(f"Skipping MSS alert for {symbol} - Invalid level {mss_out['level']}")
@@ -1986,60 +1988,31 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                     _sent_alerts.add(alert_key)
                     signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
                     
-                    # FIX #39: If MSS is weak, send Fakeout Warning instead of Setup.
                     if mss_out.get("quality") == "weak":
                         send_telegram_alert(f"⚠️ *{symbol} - {signal_label} (FAKEOUT WARNING)* ⚠️\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\n\n🛑 *Rejection Wick detected.*\n_This is likely a Judas Swing. No setup sent. Do not trade._")
-                        tg_instant_setup = None # Kill the setup
                     else:
                         send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Setup alert below..._")
-
-        if tg_instant_setup:
-            tg_setups = [tg_instant_setup]
-        else:
-            tg_setups = [buy_setup, sell_setup, planned_buy, planned_sell]
-
-        for setup in tg_setups:
-            if setup:
-                if symbol.upper() == "XAUUSD" and setup["entry"] < 1000:
-                    logger.warning(f"Skipping setup alert for {symbol} - Invalid entry price {setup['entry']}")
-                    continue
-                
-                if setup.get("confidence") == "INSTANT" and mss:
-                    # FIX #34: Use timestamp so same price level on different candles still fires
-                    mss_time_str = mss_out["time"] if mss_out and "time" in mss_out else "unknown"
-                    alert_key = f"{symbol}_instant_{mss['type']}_{mss['level']:.4f}_{mss_time_str}"
-                else:
-                    alert_key = f"{symbol}_{setup['direction']}_{setup['entry']:.2f}"
-                    
-                if alert_key not in _sent_alerts:
-                    _sent_alerts.add(alert_key)
-                    
-                    is_counter_trend = (setup["direction"] == "BUY" and not bias.get("allow_buy")) or \
-                                       (setup["direction"] == "SELL" and not bias.get("allow_sell"))
-                    
-                    if setup["confidence"] == "INSTANT":
-                        status_label = "⚡ INSTANT MSS"
-                        if is_counter_trend:
-                            status_label += " (⚠️ COUNTER-TREND)"
-                    else:
-                        status_label = setup["confidence"]
-                        if bias['tier'] == "CONFLICT":
-                            status_label = "CONFLICT (DO NOT TRADE)"
-                        elif status_label == "LOW":
-                            status_label = "WAITING (DO NOT TRADE)"
+                        
+                        if tg_instant_setup:
+                            is_counter_trend = (tg_instant_setup["direction"] == "BUY" and not bias.get("allow_buy")) or \
+                                               (tg_instant_setup["direction"] == "SELL" and not bias.get("allow_sell"))
                             
-                    direction_emoji = "🟢 BUY" if setup["direction"] == "BUY" else "🔴 SELL"
-                    setup_msg = (
-                        f"🎯 *{symbol} - {direction_emoji} SETUP* ({status_label})\n\n"
-                        f"Entry: {fmt_price(setup['entry'])}\n"
-                        f"SL: {fmt_price(setup['sl'])}\n"
-                        f"TP1: {fmt_price(setup['tp1'])}\n"
-                        f"TP2: {fmt_price(setup['tp2'])} ({setup.get('tp_basis', 'next swing')})\n"
-                        f"R:R: 1 : {setup['rr']:.2f}\n\n"
-                        f"Zone: {setup['zone_type']}\n"
-                        f"Bias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})"
-                    )
-                    send_telegram_alert(setup_msg)
+                            status_label = "⚡ INSTANT MSS"
+                            if is_counter_trend:
+                                status_label += " (⚠️ COUNTER-TREND)"
+                                
+                            direction_emoji = "🟢 BUY" if tg_instant_setup["direction"] == "BUY" else "🔴 SELL"
+                            setup_msg = (
+                                f"🎯 *{symbol} - {direction_emoji} SETUP* ({status_label})\n\n"
+                                f"Entry: {fmt_price(tg_instant_setup['entry'])}\n"
+                                f"SL: {fmt_price(tg_instant_setup['sl'])}\n"
+                                f"TP1: {fmt_price(tg_instant_setup['tp1'])}\n"
+                                f"TP2: {fmt_price(tg_instant_setup['tp2'])} ({tg_instant_setup.get('tp_basis', 'next swing')})\n"
+                                f"R:R: 1 : {tg_instant_setup['rr']:.2f}\n\n"
+                                f"Zone: {tg_instant_setup['zone_type']}\n"
+                                f"Bias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})"
+                            )
+                            send_telegram_alert(setup_msg)
 
     return {
         "symbol": symbol,
