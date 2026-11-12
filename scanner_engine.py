@@ -40,6 +40,11 @@ REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # FIX #38 - Removed Pre-MSS Sweep Telegram alerts completely. Telegram ONLY receives the confirmed MSS Instant Setup. UI continues to show all boxes.
   # FIX #39 - Added Weak MSS Rejection Filter. If the MSS candle has a massive wick (>40%), the bot sends a FAKEOUT WARNING instead of a setup, protecting against Judas Swings.
   # FIX #40 - Combined MSS alert and Instant Setup into a single atomic block. If the MSS fires, the Setup MUST send immediately below it. No more missing setups due to separate deduplication loops.
+  # FIX #41 - IDM (Inducement) Detector. The bot now requires an opposing liquidity sweep (IDM) BEFORE the MSS break. If the MSS is the first break without an IDM, it is blocked as a fakeout.
+  # FIX #42 - HTF Premium/Discount Confluence Gate. Blocks Buys if H4 is in Premium, and Sells if H4 is in Discount.
+  # FIX #43 - Allow MSS alerts to fire even if blocked by filters, so user sees the structure break and the reason it was blocked.
+  # FIX #44 - Removed H1 from the Conflict calculation. D1 and H4 agreeing is now a clear trend, regardless of H1.
+  # FIX #45 - Made MSS the absolute boss. Removed all H4 bias gating from the Telegram alert loop. If MSS fires, the Instant Setup fires.
 """
 import os
 import sys
@@ -1163,6 +1168,7 @@ def get_bias(symbol: str) -> Dict[str, Any]:
     h1_trend = "RANGING"
     h4_levels = []
     htf_obs = []
+    h4_pd = None
 
     try:
         d1_df, _ = fetch_data_cached(symbol, "1d", ttl=1800)
@@ -1182,6 +1188,13 @@ def get_bias(symbol: str) -> Dict[str, Any]:
             h4_df = find_swings(h4_df, "4h")
             h4_struct = detect_structure(h4_df)
             h4_trend = h4_struct["trend"]
+            
+            h4_dr = compute_dealing_range(h4_df, h4_struct, "4h")
+            if h4_dr:
+                last_close = safe_float(h4_df["close"].values[-1])
+                h4_mid = (h4_dr["high"] + h4_dr["low"]) / 2
+                h4_pd = "PREMIUM" if last_close > h4_mid else "DISCOUNT"
+
             for h in h4_struct.get("swing_highs", []):
                 h4_levels.append({"type": "H4_HIGH", "price": safe_float(h["price"])})
             for l in h4_struct.get("swing_lows", []):
@@ -1207,10 +1220,11 @@ def get_bias(symbol: str) -> Dict[str, Any]:
                   (d1_trend == "RANGING" and h4_trend == "BULLISH")
     weak_sell   = (d1_trend == "BEARISH" and h4_trend == "RANGING") or \
                   (d1_trend == "RANGING" and h4_trend == "BEARISH")
+                  
+    # FIX #44: Removed H1 from the conflict calculation. D1 and H4 agreeing is a trend.
     conflict    = (d1_trend == "BULLISH" and h4_trend == "BEARISH") or \
-                  (d1_trend == "BEARISH" and h4_trend == "BULLISH") or \
-                  (h4_trend == "BULLISH" and h1_trend == "BEARISH") or \
-                  (h4_trend == "BEARISH" and h1_trend == "BULLISH")
+                  (d1_trend == "BEARISH" and h4_trend == "BULLISH")
+                  
     neutral     = (d1_trend == "RANGING" and h4_trend == "RANGING")
 
     allow_buy  = strong_buy  or weak_buy  or neutral
@@ -1232,7 +1246,7 @@ def get_bias(symbol: str) -> Dict[str, Any]:
     result = {"d1_trend": d1_trend, "h4_trend": h4_trend, "h1_trend": h1_trend,
               "h4_levels": h4_levels, "htf_obs": htf_obs,
               "allow_buy": allow_buy, "allow_sell": allow_sell,
-              "tier": tier, "reason": reason}
+              "tier": tier, "reason": reason, "h4_pd": h4_pd}
     _cache_set(_bias_cache, symbol, result)
     return result
 
@@ -1258,6 +1272,7 @@ def pick_tp_swing(structure: Dict[str, Any], entry: float, direction: str) -> Tu
 SCORE_WEIGHTS_EXACT = {
     "MSS Confirmed": 3,
     "HTF Bias": 2,
+    "HTF PD": 2,
     "In Killzone": 2,
     "Displacement": 2,
     "OB Fresh": 2,
@@ -1266,6 +1281,7 @@ SCORE_WEIGHTS_EXACT = {
     "Unicorn Zone": 2, 
     "Daily Open Align": 1, 
     "Strong Displacement": 2, 
+    "IDM Swept": 3,
 }
 SCORE_WEIGHTS_PREFIX = {
     "Sweep of ": 2,
@@ -1290,7 +1306,7 @@ def score_checklist(checklist: List[Dict[str, Any]]) -> int:
 
 def build_checklist(direction: str, mss: Optional[dict], bias: Optional[dict],
                     pd: Optional[dict], killzone_ok: bool, zone: dict,
-                    rr: float, sweep: Optional[dict] = None, sessions: Optional[dict] = None, atr: float = 1.0, daily_open: Optional[float] = None, is_unicorn: bool = False) -> List[Dict[str, Any]]:
+                    rr: float, sweep: Optional[dict] = None, sessions: Optional[dict] = None, atr: float = 1.0, daily_open: Optional[float] = None, is_unicorn: bool = False, idm_swept: bool = False) -> List[Dict[str, Any]]:
     checklist = []
 
     bias_tier = bias.get("tier", "NEUTRAL") if bias else "UNKNOWN"
@@ -1304,6 +1320,11 @@ def build_checklist(direction: str, mss: Optional[dict], bias: Optional[dict],
         checklist.append({"label": "HTF Bias", "pass": True, "detail": f"WEAK — {d1}/{h4}"})
     else:
         checklist.append({"label": "HTF Bias", "pass": False, "detail": f"{bias_tier} — {d1}/{h4}"})
+
+    htf_pd = bias.get("h4_pd") if bias else None
+    if htf_pd:
+        aligned_pd = (direction == "BUY" and htf_pd == "DISCOUNT") or (direction == "SELL" and htf_pd == "PREMIUM")
+        checklist.append({"label": "HTF PD", "pass": aligned_pd, "detail": f"H4 {htf_pd}"})
 
     mss_ok = bool(mss) and (
         (mss["type"] == "MSS_BULL" and direction == "BUY") or
@@ -1330,6 +1351,11 @@ def build_checklist(direction: str, mss: Optional[dict], bias: Optional[dict],
         sweep_detail = "No recent sweep"
     checklist.append({
         "label": sweep_label, "pass": sweep_ok, "detail": sweep_detail
+    })
+
+    checklist.append({
+        "label": "IDM Swept", "pass": idm_swept, 
+        "detail": "Inducement confirmed" if idm_swept else "First break — high fakeout risk"
     })
 
     want = "DISCOUNT" if direction == "BUY" else "PREMIUM"
@@ -1503,6 +1529,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
     if recent_range < (atr * 2.5):
         return None, None, None, None, None, None, "⚠️ BLOCKED: Market is ranging (Low Volatility)."
 
+    # FIX #36: Generate Pre-MSS setups FIRST, and nullify opposing directions immediately.
     pre_mss_buy, pre_mss_sell = None, None
     if sweep and sweep.get("latest"):
         latest = sweep["latest"]
@@ -1560,6 +1587,26 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
 
     if not mss:
         return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
+
+    # FIX #41: IDM Detector (Must have swept opposing side before the MSS break)
+    idm_swept = False
+    if mss["type"] == "MSS_BEAR":
+        if sweep and sweep.get("bsl") and sweep["bsl"]["index"] < mss["break_index"]:
+            idm_swept = True
+    elif mss["type"] == "MSS_BULL":
+        if sweep and sweep.get("ssl") and sweep["ssl"]["index"] < mss["break_index"]:
+            idm_swept = True
+            
+    if not idm_swept:
+        return None, None, None, None, pre_mss_buy, pre_mss_sell, ("⚠️ BLOCKED: First break of structure. No Inducement (IDM) detected. High risk of Judas Swing.")
+
+    # FIX #42: HTF Premium/Discount Confluence Gate
+    htf_pd = bias.get("h4_pd") if bias else None
+    if htf_pd:
+        if mss["type"] == "MSS_BULL" and htf_pd == "PREMIUM":
+            return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED BUY: Price is in H4 PREMIUM zone. HTF Confluence failed."
+        elif mss["type"] == "MSS_BEAR" and htf_pd == "DISCOUNT":
+            return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED SELL: Price is in H4 DISCOUNT zone. HTF Confluence failed."
 
     recent = df.tail(3)
     displacement_bear = False
@@ -1619,7 +1666,7 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                         is_unicorn = True
                         break
 
-        checklist = build_checklist(direction, mss, bias, pd_zones, killzone_ok, zone, rr, sweep=sweep, sessions=sessions, atr=atr, daily_open=daily_open, is_unicorn=is_unicorn)
+        checklist = build_checklist(direction, mss, bias, pd_zones, killzone_ok, zone, rr, sweep=sweep, sessions=sessions, atr=atr, daily_open=daily_open, is_unicorn=is_unicorn, idm_swept=idm_swept)
         pts = score_checklist(checklist)
 
         if pts >= 10:
@@ -1975,8 +2022,8 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                 _sent_alerts.add(alert_key)
                 send_telegram_alert(f"🛑 *{symbol} - MACRO WARNING* 🛑\n\n{warning_msg}\n\n_Scanner is locked. Do not trade._")
 
-        # FIX #40: Combined MSS Alert & Setup
-        if mss_out and not warning_msg:
+        # FIX #45: Strictly MSS driven. Pre-MSS alerts removed.
+        if mss_out:
             if symbol.upper() == "XAUUSD" and mss_out["level"] < 1000:
                 logger.warning(f"Skipping MSS alert for {symbol} - Invalid level {mss_out['level']}")
             else:
@@ -1984,35 +2031,41 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
                     alert_key = f"{symbol}_bos_{mss_out['type']}_{mss_out['level']:.4f}"
                 else:
                     alert_key = f"{symbol}_mss_{mss_out['time']}_{mss_out['type']}"
+                    
                 if alert_key not in _sent_alerts:
                     _sent_alerts.add(alert_key)
                     signal_label = "BOS CONTINUATION" if "BOS" in mss_out["description"] else mss_out['type'].replace("_", " ")
                     
-                    if mss_out.get("quality") == "weak":
-                        send_telegram_alert(f"⚠️ *{symbol} - {signal_label} (FAKEOUT WARNING)* ⚠️\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\n\n🛑 *Rejection Wick detected.*\n_This is likely a Judas Swing. No setup sent. Do not trade._")
+                    if warning_msg:
+                        # Send Blocked Alert
+                        send_telegram_alert(f"⚠️ *{symbol} - {signal_label} (BLOCKED)* ⚠️\n\n{warning_msg}\n\n_Structure broke, but setup was filtered out by rules. Do not trade._")
                     else:
-                        send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Setup alert below..._")
-                        
-                        if tg_instant_setup:
-                            is_counter_trend = (tg_instant_setup["direction"] == "BUY" and not bias.get("allow_buy")) or \
-                                               (tg_instant_setup["direction"] == "SELL" and not bias.get("allow_sell"))
+                        # Send Valid Alert & Setup
+                        if mss_out.get("quality") == "weak":
+                            send_telegram_alert(f"⚠️ *{symbol} - {signal_label} (FAKEOUT WARNING)* ⚠️\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\n\n🛑 *Rejection Wick detected.*\n_This is likely a Judas Swing. No setup sent. Do not trade._")
+                        else:
+                            send_telegram_alert(f"🚨 *{symbol} - {signal_label}* 🚨\n\nPrice closed at {fmt_price(mss_out['level'])}\nBias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})\nSession: {killzone}\n\n👉 _Setup alert below..._")
                             
-                            status_label = "⚡ INSTANT MSS"
-                            if is_counter_trend:
-                                status_label += " (⚠️ COUNTER-TREND)"
+                            if tg_instant_setup:
+                                is_counter_trend = (tg_instant_setup["direction"] == "BUY" and not bias.get("allow_buy")) or \
+                                                   (tg_instant_setup["direction"] == "SELL" and not bias.get("allow_sell"))
                                 
-                            direction_emoji = "🟢 BUY" if tg_instant_setup["direction"] == "BUY" else "🔴 SELL"
-                            setup_msg = (
-                                f"🎯 *{symbol} - {direction_emoji} SETUP* ({status_label})\n\n"
-                                f"Entry: {fmt_price(tg_instant_setup['entry'])}\n"
-                                f"SL: {fmt_price(tg_instant_setup['sl'])}\n"
-                                f"TP1: {fmt_price(tg_instant_setup['tp1'])}\n"
-                                f"TP2: {fmt_price(tg_instant_setup['tp2'])} ({tg_instant_setup.get('tp_basis', 'next swing')})\n"
-                                f"R:R: 1 : {tg_instant_setup['rr']:.2f}\n\n"
-                                f"Zone: {tg_instant_setup['zone_type']}\n"
-                                f"Bias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})"
-                            )
-                            send_telegram_alert(setup_msg)
+                                status_label = "⚡ INSTANT MSS"
+                                if is_counter_trend:
+                                    status_label += " (⚠️ COUNTER-TREND)"
+                                    
+                                direction_emoji = "🟢 BUY" if tg_instant_setup["direction"] == "BUY" else "🔴 SELL"
+                                setup_msg = (
+                                    f"🎯 *{symbol} - {direction_emoji} SETUP* ({status_label})\n\n"
+                                    f"Entry: {fmt_price(tg_instant_setup['entry'])}\n"
+                                    f"SL: {fmt_price(tg_instant_setup['sl'])}\n"
+                                    f"TP1: {fmt_price(tg_instant_setup['tp1'])}\n"
+                                    f"TP2: {fmt_price(tg_instant_setup['tp2'])} ({tg_instant_setup.get('tp_basis', 'next swing')})\n"
+                                    f"R:R: 1 : {tg_instant_setup['rr']:.2f}\n\n"
+                                    f"Zone: {tg_instant_setup['zone_type']}\n"
+                                    f"Bias: {bias['tier']} (D1:{bias['d1_trend']} H4:{bias['h4_trend']} H1:{bias['h1_trend']})"
+                                )
+                                send_telegram_alert(setup_msg)
 
     return {
         "symbol": symbol,
@@ -2150,7 +2203,9 @@ def _run_structural_tests():
     fake_checklist = [
         {"label": "MSS Confirmed", "pass": True, "detail": ""},
         {"label": "HTF Bias", "pass": True, "detail": ""},
+        {"label": "HTF PD", "pass": True, "detail": ""},
         {"label": "Sweep of SSL", "pass": True, "detail": ""},
+        {"label": "IDM Swept", "pass": True, "detail": ""},
         {"label": "Price in DISCOUNT", "pass": True, "detail": ""},
         {"label": "In Killzone", "pass": True, "detail": ""},
         {"label": "Displacement", "pass": True, "detail": ""},
@@ -2162,7 +2217,7 @@ def _run_structural_tests():
         {"label": "Daily Open Align", "pass": True, "detail": ""},
         {"label": "Strong Displacement", "pass": True, "detail": ""},
     ]
-    assert score_checklist(fake_checklist) == 25, f"got {score_checklist(fake_checklist)}"
+    assert score_checklist(fake_checklist) == 30, f"got {score_checklist(fake_checklist)}"
 
     assert "US100" in INSTRUMENT_MAP
     assert "US100" in YF_FALLBACK
@@ -2258,7 +2313,7 @@ def _run_golden_fixture_test(mod):
 
     neutral_bias = {
         "d1_trend": "RANGING", "h4_trend": "RANGING", "h1_trend": "RANGING",
-        "h4_levels": [], "htf_obs": [],
+        "h4_levels": [], "htf_obs": [], "h4_pd": "DISCOUNT",
         "allow_buy": True, "allow_sell": True,
         "tier": "NEUTRAL", "reason": "mock",
     }
@@ -2375,7 +2430,7 @@ def _run_analyze_test(mod):
 
     fake_bias = {
         "d1_trend": "BULLISH", "h4_trend": "BULLISH", "h1_trend": "BULLISH",
-        "h4_levels": [], "htf_obs": [],
+        "h4_levels": [], "htf_obs": [], "h4_pd": "DISCOUNT",
         "allow_buy": True, "allow_sell": False,
         "tier": "STRONG", "reason": "mock",
     }
