@@ -45,6 +45,7 @@ REVISION 4 (Institutional Grade) + HYBRID TELEGRAM INSTANT FEATURE:
   # FIX #43 - Allow MSS alerts to fire even if blocked by filters, so user sees the structure break and the reason it was blocked.
   # FIX #44 - Removed H1 from the Conflict calculation. D1 and H4 agreeing is now a clear trend, regardless of H1.
   # FIX #45 - Made MSS the absolute boss. Removed all H4 bias gating from the Telegram alert loop. If MSS fires, the Instant Setup fires.
+  # FIX #46 - Added UI Toggles for IDM, HTF PD, and DXY filters to bypass them if user chooses.
 """
 import os
 import sys
@@ -1495,7 +1496,8 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
                        fvgs: List[dict], pools: List[dict], pd_zones: Optional[dict],
                        timeframe: str, mss: Optional[dict] = None, symbol: str = "",
                        bias: Optional[dict] = None, killzone_ok: bool = True,
-                       sweep: Optional[dict] = None, use_ema_filter: bool = True, sessions: Optional[dict] = None, daily_open: Optional[float] = None) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[str]]:
+                       sweep: Optional[dict] = None, use_ema_filter: bool = True, sessions: Optional[dict] = None, daily_open: Optional[float] = None,
+                       use_idm_filter: bool = True, use_htf_pd_filter: bool = True, use_dxy_filter: bool = True) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[str]]:
     atr = safe_float((df["high"] - df["low"]).rolling(14).mean().iloc[-1], 0.5)
     current_price = safe_float(df["close"].values[-1])
 
@@ -1573,17 +1575,18 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
 
     dxy_trend = get_dxy_trend() if symbol.upper() == "XAUUSD" else "RANGING"
     
-    if dxy_trend == "BULLISH":
-        if mss and mss["type"] == "MSS_BULL":
-            return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED BUY: DXY is strongly BULLISH."
-        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "SSL_SWEEP":
-            return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED PRE-MSS BUY: DXY is strongly BULLISH."
-            
-    if dxy_trend == "BEARISH":
-        if mss and mss["type"] == "MSS_BEAR":
-            return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED SELL: DXY is strongly BEARISH."
-        if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "BSL_SWEEP":
-            return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED PRE-MSS SELL: DXY is strongly BEARISH."
+    if use_dxy_filter:
+        if dxy_trend == "BULLISH":
+            if mss and mss["type"] == "MSS_BULL":
+                return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED BUY: DXY is strongly BULLISH."
+            if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "SSL_SWEEP":
+                return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED PRE-MSS BUY: DXY is strongly BULLISH."
+                
+        if dxy_trend == "BEARISH":
+            if mss and mss["type"] == "MSS_BEAR":
+                return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED SELL: DXY is strongly BEARISH."
+            if not mss and sweep and sweep.get("latest") and sweep["latest"]["type"] == "BSL_SWEEP":
+                return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED PRE-MSS SELL: DXY is strongly BEARISH."
 
     if not mss:
         return None, None, None, None, pre_mss_buy, pre_mss_sell, warning_msg
@@ -1597,12 +1600,12 @@ def generate_scenarios(df: pd.DataFrame, structure: Dict[str, Any], obs: List[di
         if sweep and sweep.get("ssl") and sweep["ssl"]["index"] < mss["break_index"]:
             idm_swept = True
             
-    if not idm_swept:
+    if use_idm_filter and not idm_swept:
         return None, None, None, None, pre_mss_buy, pre_mss_sell, ("⚠️ BLOCKED: First break of structure. No Inducement (IDM) detected. High risk of Judas Swing.")
 
     # FIX #42: HTF Premium/Discount Confluence Gate
     htf_pd = bias.get("h4_pd") if bias else None
-    if htf_pd:
+    if use_htf_pd_filter and htf_pd:
         if mss["type"] == "MSS_BULL" and htf_pd == "PREMIUM":
             return None, None, None, None, pre_mss_buy, pre_mss_sell, "⚠️ BLOCKED BUY: Price is in H4 PREMIUM zone. HTF Confluence failed."
         elif mss["type"] == "MSS_BEAR" and htf_pd == "DISCOUNT":
@@ -1864,7 +1867,7 @@ def _build_swing_markers(df: pd.DataFrame, swings: List[dict]) -> List[Dict[str,
                 continue
     return markers
 
-def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> Dict[str, Any]:
+def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True, use_idm_filter: bool = True, use_htf_pd_filter: bool = True, use_dxy_filter: bool = True) -> Dict[str, Any]:
     df, live_px, used_source, is_tick = _fetch_with_live_cached(symbol, timeframe)
     if df is None or df.empty:
         return {"error": f"Could not fetch {symbol} {timeframe}: {used_source}"}
@@ -1904,7 +1907,8 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
 
     buy_setup, sell_setup, planned_buy, planned_sell, pre_mss_buy, pre_mss_sell, warning_msg = generate_scenarios(
         df, structure, obs, fvgs, pools, pd_zones, timeframe, mss,
-        symbol=symbol, bias=bias, killzone_ok=killzone_ok, sweep=sweep, use_ema_filter=use_ema_filter, sessions=sessions, daily_open=daily_open
+        symbol=symbol, bias=bias, killzone_ok=killzone_ok, sweep=sweep, use_ema_filter=use_ema_filter, sessions=sessions, daily_open=daily_open,
+        use_idm_filter=use_idm_filter, use_htf_pd_filter=use_htf_pd_filter, use_dxy_filter=use_dxy_filter
     )
     killzone = current_killzone(symbol)
 
@@ -2100,9 +2104,9 @@ def _analyze_inner(symbol: str, timeframe: str, use_ema_filter: bool = True) -> 
         "data_source": used_source,
     }
 
-def analyze(symbol: str, timeframe: str, use_ema_filter: bool = True) -> Dict[str, Any]:
+def analyze(symbol: str, timeframe: str, use_ema_filter: bool = True, use_idm_filter: bool = True, use_htf_pd_filter: bool = True, use_dxy_filter: bool = True) -> Dict[str, Any]:
     try:
-        return _analyze_inner(symbol, timeframe, use_ema_filter)
+        return _analyze_inner(symbol, timeframe, use_ema_filter, use_idm_filter, use_htf_pd_filter, use_dxy_filter)
     except Exception as e:
         logger.exception("analyze() failed for %s %s", symbol, timeframe)
         return {

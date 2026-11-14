@@ -108,8 +108,19 @@ def scanner():
     # <!-- 200 EMA FILTER ADDED -->
     ema_param = request.args.get('ema', 'true').lower()
     use_ema_filter = True if ema_param == 'true' else False
+    # <!-- NEW TOGGLES ADDED -->
+    idm_param = request.args.get('idm', 'true').lower()
+    use_idm_filter = True if idm_param == 'true' else False
+    
+    htf_pd_param = request.args.get('htf_pd', 'true').lower()
+    use_htf_pd_filter = True if htf_pd_param == 'true' else False
+    
+    dxy_param = request.args.get('dxy', 'true').lower()
+    use_dxy_filter = True if dxy_param == 'true' else False
+    # <!-- END NEW TOGGLES -->
+
     try:
-        result = scanner_engine.analyze(symbol, timeframe, use_ema_filter)
+        result = scanner_engine.analyze(symbol, timeframe, use_ema_filter, use_idm_filter, use_htf_pd_filter, use_dxy_filter)
     except Exception as e:
         result = {"error": str(e)}
     return render_template('scanner.html', data=result,
@@ -123,8 +134,19 @@ def api_scanner():
     # <!-- 200 EMA FILTER ADDED -->
     ema_param = request.args.get('ema', 'true').lower()
     use_ema_filter = True if ema_param == 'true' else False
+    # <!-- NEW TOGGLES ADDED -->
+    idm_param = request.args.get('idm', 'true').lower()
+    use_idm_filter = True if idm_param == 'true' else False
+    
+    htf_pd_param = request.args.get('htf_pd', 'true').lower()
+    use_htf_pd_filter = True if htf_pd_param == 'true' else False
+    
+    dxy_param = request.args.get('dxy', 'true').lower()
+    use_dxy_filter = True if dxy_param == 'true' else False
+    # <!-- END NEW TOGGLES -->
+    
     try:
-        result = scanner_engine.analyze(symbol, timeframe, use_ema_filter)
+        result = scanner_engine.analyze(symbol, timeframe, use_ema_filter, use_idm_filter, use_htf_pd_filter, use_dxy_filter)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)})

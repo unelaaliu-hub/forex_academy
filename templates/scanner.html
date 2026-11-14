@@ -257,7 +257,17 @@
       <label class="toggle-item active" id="toggleEmaFilterLabel">
         <input type="checkbox" id="toggleEmaFilter" checked onchange="toggleEmaFilter(this)"> 200 EMA Filter
       </label>
-      <!-- END 200 EMA FILTER ADDED -->
+      <!-- NEW TOGGLES ADDED -->
+      <label class="toggle-item active" id="toggleIdmLabel">
+        <input type="checkbox" id="toggleIdm" checked onchange="toggleIdmFilter(this)"> IDM Filter
+      </label>
+      <label class="toggle-item active" id="toggleHtfPdLabel">
+        <input type="checkbox" id="toggleHtfPd" checked onchange="toggleHtfPdFilter(this)"> HTF PD Filter
+      </label>
+      <label class="toggle-item active" id="toggleDxyLabel">
+        <input type="checkbox" id="toggleDxy" checked onchange="toggleDxyFilter(this)"> DXY Filter
+      </label>
+      <!-- END NEW TOGGLES -->
     </div>
 
     <div class="glass chart-card">
@@ -298,7 +308,7 @@
     </div>
 
     <div class="glass panel">
-      <div class="panel-title">🧭 SMT Divergence</div>
+      <div class="panel-title">🧠 SMT Divergence</div>
       <div id="smtStatus" style="font-size:13px; color:var(--muted);">
         Data feed inactive. Awaiting backend integration.
       </div>
@@ -327,7 +337,7 @@
     </div>
 
     <div class="glass panel">
-      <div class="panel-title">🕒 Session</div>
+      <div class="panel-title">⏰ Session</div>
       <div style="font-size:14px; color:#e6ecf5;" id="killzoneDisplay">{{ data.killzone }}</div>
     </div>
 
@@ -416,6 +426,9 @@ let rangeRedrawPending = false;
 const show = { HTF: true, OB: true, FVG: true, POOL: true, PDHL: true, SESSION: true, OTE: true, SETUP: false, SWING: true, H4: true };
 let showCounterTrend = false;
 let useEmaFilter = true; // <!-- 200 EMA FILTER ADDED -->
+let useIdmFilter = true; // <!-- NEW TOGGLE -->
+let useHtfPdFilter = true; // <!-- NEW TOGGLE -->
+let useDxyFilter = true; // <!-- NEW TOGGLE -->
 const MAX_SWINGS_PER_SIDE = 5;
 let lastZoneSig = null;
 
@@ -612,6 +625,29 @@ function toggleEmaFilter(checkbox) {
   // No immediate redraw needed, will apply on next fetch
 }
 // <!-- END 200 EMA FILTER ADDED -->
+
+// <!-- NEW TOGGLES ADDED -->
+function toggleIdmFilter(checkbox) {
+  useIdmFilter = checkbox.checked;
+  const label = document.getElementById('toggleIdmLabel');
+  if (checkbox.checked) label.classList.add('active');
+  else label.classList.remove('active');
+}
+
+function toggleHtfPdFilter(checkbox) {
+  useHtfPdFilter = checkbox.checked;
+  const label = document.getElementById('toggleHtfPdLabel');
+  if (checkbox.checked) label.classList.add('active');
+  else label.classList.remove('active');
+}
+
+function toggleDxyFilter(checkbox) {
+  useDxyFilter = checkbox.checked;
+  const label = document.getElementById('toggleDxyLabel');
+  if (checkbox.checked) label.classList.add('active');
+  else label.classList.remove('active');
+}
+// <!-- END NEW TOGGLES -->
 
 function drawHTFZones(data) {
   if (!show.HTF || !data.bias || !data.bias.htf_obs) return;
@@ -1420,7 +1456,7 @@ function renderPreMssBox(p) {
   const px = (v) => v < 100 ? v.toFixed(4) : v.toFixed(2);
 
   let html = `<div class="planned-box" style="border-color: #fbbf24; background: rgba(251, 191, 36, 0.15); margin-bottom: 12px;">`;
-  html += `<div class="planned-title" style="color: #fbbf24;">⚡ PRE-MSS SWEEP (HIGH RISK)</div>`;
+  html += `<div class="planned-title" style="color: #fbbf24;">⚠️ PRE-MSS SWEEP (HIGH RISK)</div>`;
   html += `<div class="planned-sub">${dirLabel} <span style="color:var(--muted);">from Sweep</span><br><span style="color:var(--gold);">Early Entry Alert</span></div>`;
   html += '<div class="planned-grid">';
   html += `<div class="planned-cell"><div class="lbl">ENTRY</div><div class="val" style="color:${dirColor};">${px(p.entry)}</div></div>`;
@@ -1938,7 +1974,7 @@ window.addEventListener('load', () => {
       const timeoutId = setTimeout(() => controller.abort(), 30000);
 
       // <!-- 200 EMA FILTER ADDED TO FETCH -->
-      fetch(`/api/scanner?symbol=${meta.symbol}&tf=${meta.tf}&ema=${useEmaFilter}`, {
+      fetch(`/api/scanner?symbol=${meta.symbol}&tf=${meta.tf}&ema=${useEmaFilter}&idm=${useIdmFilter}&htf_pd=${useHtfPdFilter}&dxy=${useDxyFilter}`, {
         cache: 'no-store',
         signal: controller.signal
       })
